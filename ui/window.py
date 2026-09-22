@@ -12,10 +12,13 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from app.config import AppConfig
-from app.controls import ControlSnapshot
+from app.controls import ControlMode, ControlSnapshot, DeviceAction, DeviceSnapshot
 from app.gestures import GestureSnapshot
 from app.hand_tracking import TrackingSnapshot
 from app.state import AppState, Telemetry
+
+# A sidebar module never collapses below this, even in a very short window.
+MIN_PANEL_HEIGHT = 48
 from ui.animations import PulseAnimation
 from ui.boot_screen import BootScreen
 from ui.camera_view import CameraView
@@ -100,6 +103,9 @@ class MainWindow:
         on_exit: Optional[Callable[[], None]] = None,
         on_control_toggle: Optional[Callable[[], None]] = None,
         on_control_disable: Optional[Callable[[], None]] = None,
+        on_control_mode: Optional[Callable[[ControlMode], None]] = None,
+        on_device_toggle: Optional[Callable[[], None]] = None,
+        on_device_action: Optional[Callable[[DeviceAction, Optional[str]], None]] = None,
     ):
         self.config = config
         self.telemetry = telemetry
@@ -107,6 +113,9 @@ class MainWindow:
         self.on_exit = on_exit
         self.on_control_toggle = on_control_toggle
         self.on_control_disable = on_control_disable
+        self.on_control_mode = on_control_mode
+        self.on_device_toggle = on_device_toggle
+        self.on_device_action = on_device_action
 
         self.width = max(config.min_window_width, config.window_width)
         self.height = max(config.min_window_height, config.window_height)
@@ -144,6 +153,7 @@ class MainWindow:
         # always land on the button the user can actually see.
         self.control_toggle_rect: Optional[pygame.Rect] = None
         self.control_disable_rect: Optional[pygame.Rect] = None
+        self.device_buttons: Dict[str, Optional[pygame.Rect]] = {}
 
     def _init_fonts(self) -> Dict[str, pygame.font.Font]:
         """Initialize clean, platform-independent typography."""
@@ -250,10 +260,17 @@ class MainWindow:
                     # Toggle mouse control from the interface (never from the hand,
                     # which can only pause an already armed controller).
                     self._handle_control_toggle()
+                elif event.key == pygame.K_m:
+                    # Control modes are only ever changed deliberately.
+                    self._handle_control_mode(ControlMode.MOUSE)
+                elif event.key == pygame.K_d:
+                    self._handle_control_mode(ControlMode.DEVICE)
 
-            # Mouse control buttons live in the sidebar telemetry panels.
+            # Control buttons live in the sidebar telemetry panels.
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if self._handle_control_click(event.pos):
+                    continue
+                if self._handle_device_click(event.pos):
                     continue
 
             # Handle interactive buttons if in error state
@@ -279,6 +296,40 @@ class MainWindow:
     def _handle_control_toggle(self) -> None:
         if self.on_control_toggle:
             self.on_control_toggle()
+
+    def _handle_control_mode(self, mode: ControlMode) -> None:
+        if self.on_control_mode:
+            self.on_control_mode(mode)
+
+    def _handle_device_click(self, position: Tuple[int, int]) -> bool:
+        """Route a click to the device module buttons. True when consumed."""
+        for role, rect in self.device_buttons.items():
+            if rect is None or not rect.collidepoint(position):
+                continue
+            if role == "mode":
+                mode = (
+                    ControlMode.MOUSE
+                    if self.telemetry.control_mode is ControlMode.DEVICE
+                    else ControlMode.DEVICE
+                )
+                self._handle_control_mode(mode)
+            elif role == "toggle":
+                if self.on_device_toggle:
+                    self.on_device_toggle()
+            elif role == "minimize":
+                self._device_action(DeviceAction.MINIMIZE)
+            elif role == "maximize":
+                self._device_action(DeviceAction.MAXIMIZE)
+            elif role == "switch":
+                self._device_action(DeviceAction.NEXT_WINDOW)
+            elif role.startswith("launch:"):
+                self._device_action(DeviceAction.LAUNCH_APP, role.split(":", 1)[1])
+            return True
+        return False
+
+    def _device_action(self, action: DeviceAction, argument: Optional[str] = None) -> None:
+        if self.on_device_action:
+            self.on_device_action(action, argument)
 
     def render_error_screen(self) -> None:
         """Render polished sci-fi camera unavailable recovery screen."""
@@ -369,6 +420,7 @@ class MainWindow:
         tracking: TrackingSnapshot,
         gesture: GestureSnapshot,
         control: ControlSnapshot,
+        device: DeviceSnapshot,
     ) -> None:
         """Render header, camera viewport, telemetry sidebars, and footer."""
         self.surface.fill(COLOR_BG_DARK)
@@ -411,15 +463,42 @@ class MainWindow:
         tracking_rect = rects["tracking"]
         gesture_rect = rects["gesture"]
         control_rect = rects["control"]
+        device_rect = rects["device"]
         camera_rect = rects["camera"]
 
-        self.hud_manager.draw_system_matrix_panel(self.surface, matrix_rect, self.telemetry, self.fonts)
-        self.hud_manager.draw_tracking_panel(self.surface, tracking_rect, self.telemetry, self.fonts)
-        self.hud_manager.draw_gesture_panel(self.surface, gesture_rect, self.telemetry, self.fonts)
+        self.hud_manager.draw_system_matrix_panel(
+            self.surface, matrix_rect, self.telemetry, self.fonts
+        )
+        self._draw_panel_clipped(
+            self.hud_manager.draw_tracking_panel, tracking_rect
+        )
+        self._draw_panel_clipped(self.hud_manager.draw_gesture_panel, gesture_rect)
+
+        self.surface.set_clip(control_rect)
         self.control_toggle_rect, self.control_disable_rect = self.hud_manager.draw_control_panel(
             self.surface, control_rect, self.telemetry, self.fonts
         )
-        self.hud_manager.draw_camera_status_panel(self.surface, camera_rect, self.telemetry, self.fonts)
+        self.surface.set_clip(None)
+
+        self.surface.set_clip(device_rect)
+        self.device_buttons = self.hud_manager.draw_device_panel(
+            self.surface, device_rect, self.telemetry, self.fonts
+        )
+        self.surface.set_clip(None)
+
+        self._draw_panel_clipped(self.hud_manager.draw_camera_status_panel, camera_rect)
+
+    def _draw_panel_clipped(self, draw, rect: pygame.Rect) -> None:
+        """Draw one sidebar module inside its own rectangle.
+
+        The clip keeps modules from ever writing over each other, so a window too
+        short for every module shows less of a panel instead of a collision.
+        """
+        self.surface.set_clip(rect)
+        try:
+            draw(self.surface, rect, self.telemetry, self.fonts)
+        finally:
+            self.surface.set_clip(None)
 
     def _stack_panels(
         self,
@@ -431,43 +510,62 @@ class MainWindow:
     ) -> Dict[str, pygame.Rect]:
         """Lay out the sidebar modules so nothing is ever clipped.
 
-        Each module declares the height it needs to be fully readable. The surplus
-        is shared out in proportion to how much information each module carries;
-        when the window is too short for every module to have its ideal height,
-        all of them shrink together and the row renderers drop their supplementary
-        rows rather than overlapping.
+        Each module declares the height it needs to be fully readable and a floor
+        it may shrink to. The matrix is treated as rigid because every row it
+        carries is a status the user must be able to see; the other modules give
+        up height proportionally, and their row renderers drop supplementary rows
+        rather than overlapping.
         """
+        # (name, ideal, floor, share of surplus)
         specs = (
-            ("matrix", 114, 0.26),
-            ("tracking", 126, 0.30),
-            ("gesture", 100, 0.20),
-            ("control", 146, 0.12),
-            ("camera", 90, 0.12),
+            ("matrix", 118, 118, 0.18),
+            ("tracking", 118, 100, 0.22),
+            ("gesture", 90, 74, 0.15),
+            ("control", 136, 116, 0.13),
+            ("device", 200, 150, 0.20),
+            ("camera", 82, 76, 0.12),
         )
-        available = max(200, height - gap * (len(specs) - 1))
-        total_min = sum(minimum for _, minimum, _ in specs)
+        available = max(120, height - gap * (len(specs) - 1))
+        total_ideal = sum(ideal for _, ideal, _, _ in specs)
+        total_floor = sum(floor for _, _, floor, _ in specs)
+        heights: Dict[str, float] = {}
 
-        if available >= total_min:
-            surplus = available - total_min
-            heights = {
-                name: minimum + int(surplus * weight)
-                for name, minimum, weight in specs
-            }
+        if available >= total_ideal:
+            surplus = available - total_ideal
+            for name, ideal, _floor, weight in specs:
+                heights[name] = ideal + surplus * weight
         else:
-            scale = available / total_min
-            heights = {name: max(62, int(minimum * scale)) for name, minimum, _ in specs}
+            deficit = total_ideal - available
+            shrinkable = total_ideal - total_floor
+            if deficit <= shrinkable and shrinkable > 0:
+                # Every module keeps at least its floor.
+                scale = deficit / shrinkable
+                for name, ideal, floor, _weight in specs:
+                    heights[name] = ideal - (ideal - floor) * scale
+            else:
+                # The window is too short even for the floors: shrink all modules
+                # together so the sidebar always ends inside the window.
+                scale = available / total_floor
+                for name, _ideal, floor, _weight in specs:
+                    heights[name] = floor * scale
 
-        # Absorb rounding so the columns add up exactly: the last module would
-        # otherwise lose a few pixels to the others on every window size.
-        remainder = available - sum(heights.values())
-        heights[specs[-1][0]] += remainder
+        # Integer heights that add up exactly and never collapse a module.
+        pixels = {name: max(MIN_PANEL_HEIGHT, int(value)) for name, value in heights.items()}
+        while sum(pixels.values()) > available:
+            largest = max(pixels, key=lambda name: pixels[name])
+            if pixels[largest] <= MIN_PANEL_HEIGHT:
+                break
+            pixels[largest] -= 1
+        remainder = available - sum(pixels.values())
+        if remainder > 0:
+            widest = max(specs, key=lambda spec: spec[2])[0]
+            pixels[widest] += remainder
 
         rects: Dict[str, pygame.Rect] = {}
         y = top
-        for name, _minimum, _weight in specs:
-            panel_height = max(62, heights[name])
-            rects[name] = pygame.Rect(x, y, width, panel_height)
-            y += panel_height + gap
+        for name, _ideal, _floor, _weight in specs:
+            rects[name] = pygame.Rect(x, y, width, pixels[name])
+            y += pixels[name] + gap
         return rects
 
     def render_frame(
@@ -477,6 +575,7 @@ class MainWindow:
         tracking: TrackingSnapshot,
         gesture: GestureSnapshot,
         control: ControlSnapshot,
+        device: DeviceSnapshot,
     ) -> None:
         """Dispatch rendering based on current application state."""
         self.pulse.update(dt)
@@ -489,7 +588,7 @@ class MainWindow:
             self.boot_screen.update(dt)
             self.boot_screen.render(self.surface, pygame.Rect(0, 0, self.width, self.height), self.fonts)
         elif state == AppState.CAMERA_ACTIVE:
-            self.render_active_hud(frame, tracking, gesture, control)
+            self.render_active_hud(frame, tracking, gesture, control, device)
         elif state == AppState.CAMERA_ERROR:
             self.render_error_screen()
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:  # imported lazily in the settings builders to keep imports shallow
+    from app.controls.device_types import DeviceSettings
     from app.controls.safety import ControlSettings
     from app.gestures.types import GestureSettings
 
@@ -31,7 +32,7 @@ class AppConfig:
     # Display & UI settings
     window_title: str = "VISIONCORE // ADVANCED VISION SYSTEM"
     window_width: int = 1100
-    window_height: int = 820
+    window_height: int = 900
     min_window_width: int = 800
     min_window_height: int = 600
     fullscreen: bool = False
@@ -69,6 +70,19 @@ class AppConfig:
     scroll_deadzone: float = 0.015               # ignores tremor while scrolling
     safety_confidence_threshold: float = 0.45    # below this, actions are suspended
     emergency_stop_sec: float = 0.80             # stable open palm before the stop
+
+    # Touchless device control (volume, media, brightness, windows, launcher)
+    device_control_enabled: bool = True
+    volume_sensitivity: float = 55.0             # volume percent per frame height
+    volume_deadzone: float = 0.010               # normalised travel before acting
+    volume_max_step: float = 8.0                 # percent per action (runaway guard)
+    volume_interval_sec: float = 0.07            # rate limit between volume actions
+    brightness_sensitivity: float = 60.0         # brightness percent per frame height
+    brightness_deadzone: float = 0.010
+    brightness_max_step: float = 10.0
+    device_action_cooldown: float = 0.80         # gap between event actions
+    device_emergency_stop_sec: float = 1.80      # open palm hold that stops everything
+    device_pinch_mutes: bool = True              # PINCH toggles mute in device mode
 
     # Boot & UI settings
     boot_duration_sec: float = 2.4
@@ -164,6 +178,15 @@ class AppConfig:
             ("scroll_deadzone", 0.0, 0.20),
             ("safety_confidence_threshold", 0.05, 0.95),
             ("emergency_stop_sec", 0.20, 5.0),
+            ("volume_sensitivity", 5.0, 250.0),
+            ("volume_deadzone", 0.0, 0.20),
+            ("volume_max_step", 1.0, 25.0),
+            ("volume_interval_sec", 0.02, 1.0),
+            ("brightness_sensitivity", 5.0, 250.0),
+            ("brightness_deadzone", 0.0, 0.20),
+            ("brightness_max_step", 1.0, 25.0),
+            ("device_action_cooldown", 0.15, 5.0),
+            ("device_emergency_stop_sec", 0.40, 8.0),
             ("swipe_distance_threshold", 0.05, 0.90),
             ("swipe_velocity_threshold", 0.10, 6.0),
             ("swipe_cooldown", 0.05, 3.0),
@@ -174,6 +197,28 @@ class AppConfig:
                 clamped = max(low, min(high, value))
                 logger.warning("%s %.2f out of bounds [%.2f, %.2f]; clamping to %.2f", name, value, low, high, clamped)
                 setattr(self, name, clamped)
+
+    def device_settings(self) -> "DeviceSettings":
+        """Build the device control settings from the application configuration."""
+        from app.controls.device_types import DeviceSettings
+
+        return DeviceSettings(
+            enabled=(
+                self.device_control_enabled
+                and self.gesture_enabled
+                and self.tracking_enabled
+            ),
+            volume_sensitivity=self.volume_sensitivity,
+            volume_deadzone=self.volume_deadzone,
+            volume_max_step=self.volume_max_step,
+            volume_interval_sec=self.volume_interval_sec,
+            brightness_sensitivity=self.brightness_sensitivity,
+            brightness_deadzone=self.brightness_deadzone,
+            brightness_max_step=self.brightness_max_step,
+            action_cooldown_sec=self.device_action_cooldown,
+            emergency_stop_sec=self.device_emergency_stop_sec,
+            pinch_mutes=self.device_pinch_mutes,
+        ).clamped()
 
     def control_settings(self) -> "ControlSettings":
         """Build the mouse control settings from the application configuration."""

@@ -13,7 +13,14 @@ import pygame
 
 from app.camera import CameraManager
 from app.config import AppConfig
-from app.controls import ControlState, MouseController
+from app.controls import (
+    ControlMode,
+    ControlState,
+    DeviceAction,
+    DeviceController,
+    MouseController,
+    WindowAction,
+)
 from app.gestures import GestureEngine
 from app.hand_tracking import HandTracker, TrackingSnapshot
 from app.logger import setup_logger
@@ -98,12 +105,28 @@ class Application:
             else 4.0 / 3.0
         )
         self._gesture_snapshot = self.gestures.disabled_snapshot()
+        self._gesture_now: Optional[float] = None
 
         # Touchless mouse control. The controller is created DISABLED: it never
         # moves the cursor until the user explicitly enables it from the HUD.
         self.mouse = MouseController(self.config.control_settings())
         self._control_snapshot = self.mouse.snapshot
         self.telemetry.update_control(self._control_snapshot)
+
+        # Touchless device control: a separate layer with its own backend and its
+        # own enable state, inert until the user enables it in DEVICE mode.
+        self.device = DeviceController(
+            self.config.device_settings(),
+            gate_settings=self.config.control_settings(),
+        )
+        self._device_snapshot = self.device.snapshot
+        self.telemetry.update_device(self._device_snapshot)
+
+        # Control mode arbitration: one gesture can never act on both layers.
+        self._control_mode = ControlMode.MOUSE
+        self.mouse.set_mode(self._control_mode)
+        self.device.set_mode(self._control_mode)
+        self.telemetry.set_control_mode(self._control_mode)
 
         # UI Window Shell
         self.window = MainWindow(
@@ -113,6 +136,9 @@ class Application:
             on_exit=self.stop,
             on_control_toggle=self._toggle_mouse_control,
             on_control_disable=self._disable_mouse_control,
+            on_control_mode=self._set_control_mode,
+            on_device_toggle=self._toggle_device_control,
+            on_device_action=self._device_action,
         )
 
         self._running = False
@@ -155,6 +181,7 @@ class Application:
             if self.config.tracking_enabled and not self.tracker.is_running:
                 self.tracker.start()
             self.gestures.reset()
+            self.device.on_tracking_lost()
             logger.info("Camera reconnected successfully!")
         else:
             hint = self.platform_info.camera_permission_hint()
@@ -182,16 +209,75 @@ class Application:
         self.mouse.disable()
         self.telemetry.update_control(self.mouse.snapshot)
 
+    def _set_control_mode(self, mode: ControlMode) -> None:
+        """Switch between MOUSE and DEVICE control (explicit user action only)."""
+        if mode is self._control_mode:
+            return
+        self._control_mode = mode
+        self.mouse.set_mode(mode)
+        self.device.set_mode(mode)
+        self.telemetry.set_control_mode(mode)
+        logger.info("Control mode set to %s", mode.label)
+
+    def _toggle_device_control(self) -> None:
+        """UI action: enable, pause or resume the device control layer."""
+        self.device.toggle()
+        self.telemetry.update_device(self.device.snapshot)
+
+    def _device_action(self, action: DeviceAction, argument: Optional[str] = None) -> None:
+        """UI action: run a window action or launch an allowlisted application."""
+        if action is DeviceAction.LAUNCH_APP and argument:
+            result = self.device.perform_launch(argument)
+        else:
+            window_action = {
+                DeviceAction.MINIMIZE: WindowAction.MINIMIZE,
+                DeviceAction.MAXIMIZE: WindowAction.MAXIMIZE,
+                DeviceAction.NEXT_WINDOW: WindowAction.NEXT,
+            }.get(action)
+            if window_action is None:
+                return
+            result = self.device.perform_window_action(window_action)
+        if not result.success:
+            logger.info("Device action refused: %s (%s)", result.message, result.detail)
+        self.telemetry.update_device(self.device.snapshot)
+
     def _sync_control(self, dt: float, tracking: TrackingSnapshot) -> None:
-        """Run one mouse control pass and publish its snapshot to the HUD."""
+        """Run both control layers for one frame and publish their snapshots.
+
+        The two layers are independent, but the emergency stop is shared: a stop
+        raised by either of them immediately stops the other, so no action can
+        survive the user's stop signal.
+        """
+        mouse_before = self.mouse.state
+        device_before = self.device.state
+
         self._control_snapshot = self.mouse.update(dt, tracking, self._gesture_snapshot)
+        self._device_snapshot = self.device.update(
+            dt, tracking, self._gesture_snapshot, now=self._gesture_now
+        )
+
+        if (
+            mouse_before is not ControlState.EMERGENCY_STOP
+            and self.mouse.state is ControlState.EMERGENCY_STOP
+        ):
+            self.device.emergency_stop("EMERGENCY STOP")
+            self._device_snapshot = self.device.snapshot
+        elif (
+            device_before is not ControlState.EMERGENCY_STOP
+            and self.device.state is ControlState.EMERGENCY_STOP
+        ):
+            self.mouse.emergency_stop("EMERGENCY STOP")
+            self._control_snapshot = self.mouse.snapshot
+
         self.telemetry.update_control(self._control_snapshot)
+        self.telemetry.update_device(self._device_snapshot)
 
     def _sync_gestures(self, tracking: TrackingSnapshot) -> None:
         """Run one recognition pass per frame and publish it to the HUD."""
         if not self.gestures.enabled:
             return
-        snapshot = self.gestures.process(tracking.result, self._frame_aspect)
+        self._gesture_now = time.perf_counter()
+        snapshot = self.gestures.process(tracking.result, self._frame_aspect, self._gesture_now)
         self.telemetry.update_gestures(snapshot)
         self._gesture_snapshot = snapshot
 
@@ -308,7 +394,9 @@ class Application:
                         self.gestures.reset()
                         self.telemetry.set_gestures_unavailable()
                         self.mouse.on_tracking_lost()
+                        self.device.on_tracking_lost()
                         self.telemetry.update_control(self.mouse.snapshot)
+                        self.telemetry.update_device(self.device.snapshot)
                         self.telemetry.set_camera_error(
                             title="CAMERA DISCONNECTED",
                             message="Camera video feed lost unexpectedly.",
@@ -320,7 +408,12 @@ class Application:
                 self._sync_gestures(tracking)
                 self._sync_control(dt, tracking)
                 self.window.render_frame(
-                    current_frame, dt, tracking, self._gesture_snapshot, self._control_snapshot
+                    current_frame,
+                    dt,
+                    tracking,
+                    self._gesture_snapshot,
+                    self._control_snapshot,
+                    self._device_snapshot,
                 )
 
                 # 5. Measure and Update Render FPS
@@ -353,12 +446,19 @@ class Application:
         self.telemetry.app_state = AppState.SHUTTING_DOWN
 
         # Disarm device control first: release any held mouse button, stop the
-        # pointer and clear the pending interaction state before anything else.
+        # pointer, cancel pending device actions and stop continuous volume or
+        # brightness changes before anything else is torn down.
         try:
             self.mouse.close()
         except Exception as exc:
             logger.warning("Error shutting down mouse control: %s", exc)
         self.telemetry.set_control_unavailable()
+
+        try:
+            self.device.close()
+        except Exception as exc:
+            logger.warning("Error shutting down device control: %s", exc)
+        self.telemetry.set_device_unavailable()
 
         # Release camera hardware
         try:

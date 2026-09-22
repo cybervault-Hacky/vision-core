@@ -31,6 +31,22 @@ Point = Tuple[float, float]
 EMPTY_META: Mapping[str, object] = {}
 
 
+class ControlMode(Enum):
+    """Which control layer may act on gestures right now.
+
+    One gesture can never trigger two layers: mouse actions are only performed in
+    ``MOUSE`` and device actions only in ``DEVICE``. The mode is changed by an
+    explicit interface action, never by a gesture.
+    """
+
+    MOUSE = "MOUSE"
+    DEVICE = "DEVICE"
+
+    @property
+    def label(self) -> str:
+        return self.value
+
+
 class ControlState(Enum):
     """Lifecycle of the operating system control layer."""
 

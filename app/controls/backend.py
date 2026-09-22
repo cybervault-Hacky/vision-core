@@ -25,13 +25,13 @@ No dependency is added: only the standard library ``ctypes`` is used.
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import logging
-import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+
+from app.controls.x11 import X11Session
 
 logger = logging.getLogger("visioncore.controls.backend")
 
@@ -270,7 +270,7 @@ class WindowsMouseBackend(PlatformMouseBackend):
 
 
 class X11MouseBackend(PlatformMouseBackend):
-    """Pointer warping through ``libX11`` and synthetic events through XTEST."""
+    """Pointer warping and button events through the shared X11 session."""
 
     name = "LINUX_X11"
 
@@ -280,147 +280,38 @@ class X11MouseBackend(PlatformMouseBackend):
 
     def __init__(self) -> None:
         super().__init__()
-        self._xlib = None
-        self._xtst = None
-        self._display = None
-        self._root = 0
-        self._screen = 0
-        self._buttons_ready = False
+        self._session = X11Session()
 
     def probe(self) -> bool:
-        if not sys.platform.startswith("linux"):
-            self.reason = "X11 BACKEND ON WRONG HOST"
-            self.detail = "X11 backend loaded on a non Linux host"
-            return False
-
-        display_name = os.environ.get("DISPLAY")
-        if not display_name:
-            self.reason = "NO X DISPLAY SERVER"
-            self.detail = (
-                "DISPLAY is not set; a Wayland session without an X server is not "
-                "supported for pointer control"
-            )
-            return False
-
-        try:
-            x11_path = ctypes.util.find_library("X11")
-            if not x11_path:
-                self.reason = "LIBX11 NOT INSTALLED"
-                self.detail = "libX11 could not be located for pointer control"
-                return False
-            xlib = ctypes.CDLL(x11_path)
-
-            xlib.XOpenDisplay.restype = ctypes.c_void_p
-            xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
-            xlib.XDefaultRootWindow.restype = ctypes.c_ulong
-            xlib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
-            xlib.XDefaultScreen.argtypes = [ctypes.c_void_p]
-            xlib.XDisplayWidth.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            xlib.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            xlib.XWarpPointer.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_uint,
-                ctypes.c_uint,
-                ctypes.c_int,
-                ctypes.c_int,
-            ]
-            xlib.XFlush.argtypes = [ctypes.c_void_p]
-
-            display = xlib.XOpenDisplay(display_name.encode("utf-8"))
-            if not display:
-                self.reason = "X DISPLAY UNAVAILABLE"
-                self.detail = f"Could not open X display '{display_name}'"
-                return False
-
-            self._xlib = xlib
-            self._display = ctypes.c_void_p(display)
-            self._screen = int(xlib.XDefaultScreen(self._display))
-            self._root = int(xlib.XDefaultRootWindow(self._display))
-        except Exception as exc:
-            self.reason = "X11 INITIALISATION FAILED"
-            self.detail = f"X11 initialisation failed ({exc})"
-            return False
-
-        # Buttons need the XTEST extension; the pointer can still be moved
-        # without it, so a missing libXtst degrades instead of failing outright.
-        try:
-            xtst_path = ctypes.util.find_library("Xtst")
-            if xtst_path:
-                xtst = ctypes.CDLL(xtst_path)
-                xtst.XTestFakeButtonEvent.argtypes = [
-                    ctypes.c_void_p,
-                    ctypes.c_uint,
-                    ctypes.c_int,
-                    ctypes.c_ulong,
-                ]
-                self._xtst = xtst
-                self._buttons_ready = True
-        except Exception as exc:
-            logger.warning("XTEST extension unavailable, clicks disabled: %s", exc)
-
-        if not self.screen_geometry():
-            self.reason = "X DISPLAY SIZE UNAVAILABLE"
-            self.detail = "Could not read the X display dimensions"
+        if not self._session.open():
+            self.reason = self._session.reason
+            self.detail = self._session.detail
             return False
 
         self.available = True
-        if self._buttons_ready:
-            self.reason = "READY"
-            self.detail = "X11 pointer and XTEST button events ready"
-        else:
-            self.reason = "XTEST EXTENSION MISSING"
-            self.detail = "Pointer control available, clicks and scrolling disabled"
+        self.reason = self._session.reason
+        self.detail = self._session.detail
         return True
 
     @property
     def supports_buttons(self) -> bool:
-        return self._buttons_ready
+        return self._session.keys_ready
 
     def screen_geometry(self) -> Optional[ScreenGeometry]:
-        if self._xlib is None or self._display is None:
+        size = self._session.screen_size()
+        if size is None:
             return None
-        try:
-            width = int(self._xlib.XDisplayWidth(self._display, self._screen))
-            height = int(self._xlib.XDisplayHeight(self._display, self._screen))
-        except Exception as exc:  # pragma: no cover - platform dependent
-            logger.warning("Could not read X display size: %s", exc)
-            return None
-        geometry = ScreenGeometry(0, 0, width, height)
+        geometry = ScreenGeometry(0, 0, size[0], size[1])
         return geometry if geometry.valid else None
 
     def move_absolute(self, x: int, y: int) -> bool:
-        if self._xlib is None or self._display is None:
-            return False
-        try:
-            self._xlib.XWarpPointer(
-                self._display, 0, self._root, 0, 0, 0, 0, int(x), int(y)
-            )
-            self._xlib.XFlush(self._display)
-            return True
-        except Exception as exc:  # pragma: no cover - platform dependent
-            logger.warning("X11 pointer move failed: %s", exc)
-            return False
-
-    def _fake_button(self, button: int, pressed: bool) -> bool:
-        if self._xtst is None or self._display is None:
-            return False
-        try:
-            self._xtst.XTestFakeButtonEvent(self._display, button, 1 if pressed else 0, 0)
-            self._xlib.XFlush(self._display)
-            return True
-        except Exception as exc:  # pragma: no cover - platform dependent
-            logger.warning("X11 button event failed: %s", exc)
-            return False
+        return self._session.warp_pointer(x, y)
 
     def button_down(self, button: MouseButton) -> bool:
-        return self._fake_button(1 if button is MouseButton.LEFT else 2, True)
+        return self._session.fake_button(1 if button is MouseButton.LEFT else 2, True)
 
     def button_up(self, button: MouseButton) -> bool:
-        return self._fake_button(1 if button is MouseButton.LEFT else 2, False)
+        return self._session.fake_button(1 if button is MouseButton.LEFT else 2, False)
 
     def scroll(self, notches: int) -> bool:
         if notches == 0:
@@ -428,21 +319,12 @@ class X11MouseBackend(PlatformMouseBackend):
         button = self._WHEEL_UP if notches > 0 else self._WHEEL_DOWN
         ok = True
         for _ in range(min(abs(int(notches)), 8)):
-            ok = self._fake_button(button, True) and ok
-            ok = self._fake_button(button, False) and ok
+            ok = self._session.fake_button(button, True) and ok
+            ok = self._session.fake_button(button, False) and ok
         return ok
 
     def close(self) -> None:
-        if self._xlib is not None and self._display is not None:
-            try:
-                self._xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
-                self._xlib.XCloseDisplay(self._display)
-            except Exception:
-                pass
-        self._display = None
-        self._xlib = None
-        self._xtst = None
-        self._buttons_ready = False
+        self._session.close()
 
 
 def create_backend() -> PlatformMouseBackend:

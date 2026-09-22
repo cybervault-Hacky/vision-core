@@ -30,6 +30,7 @@ from app.controls.mouse_mapper import CursorMapper
 from app.controls.safety import (
     ControlAction,
     ControlCounters,
+    ControlMode,
     ControlSettings,
     ControlSnapshot,
     ControlState,
@@ -67,6 +68,7 @@ class MouseController:
         self._mapper: Optional[CursorMapper] = None
 
         self._state = ControlState.DISABLED
+        self._mode = ControlMode.MOUSE
         self._message = ""
         self._pointer_active = False
         self._dragging = False
@@ -117,6 +119,23 @@ class MouseController:
     def pointer_active(self) -> bool:
         return self._pointer_active
 
+    @property
+    def mode(self) -> ControlMode:
+        return self._mode
+
+    def set_mode(self, mode: ControlMode) -> None:
+        """Adopt the application control mode.
+
+        In ``DEVICE`` mode the mouse layer releases everything and performs no
+        action, so a pinch can never be both a click and a device command.
+        """
+        if mode is self._mode:
+            return
+        self._mode = mode
+        self._release_pointer_state()
+        self._refresh_snapshot()
+        logger.info("Mouse control mode: %s", mode.label)
+
     def _startup_message(self) -> str:
         if not self.settings.enabled:
             return "DISABLED IN CONFIGURATION"
@@ -165,6 +184,7 @@ class MouseController:
         self._release_pointer_state()
         self._state = ControlState.DISABLED
         self._message = self._startup_message()
+        self._refresh_snapshot()
         logger.info("Mouse control disabled")
 
     def pause(self) -> None:
@@ -173,6 +193,7 @@ class MouseController:
             self._release_pointer_state()
             self._state = ControlState.PAUSED
             self._message = ""
+            self._refresh_snapshot()
             logger.info("Mouse control paused")
 
     def resume(self) -> None:
@@ -223,6 +244,7 @@ class MouseController:
         """Fail-safe teardown: release any button, then close the backend."""
         self._release_pointer_state()
         self._state = ControlState.DISABLED
+        self._refresh_snapshot()
         try:
             atexit.unregister(self._final_release)
         except Exception:
@@ -260,6 +282,11 @@ class MouseController:
             return self._publish(
                 self._snapshot_for(now, hand, message="TRACKING CONTINUES")
             )
+
+        if self._mode is ControlMode.DEVICE:
+            # Device mode: pointer, click, drag and scroll are all suspended.
+            self._release_pointer_state()
+            return self._publish(self._snapshot_for(now, hand, message="DEVICE MODE"))
 
         if self._state is ControlState.EMERGENCY_STOP:
             self._release_pointer_state()
@@ -583,6 +610,15 @@ class MouseController:
     def _publish(self, snapshot: ControlSnapshot) -> ControlSnapshot:
         self._snapshot = snapshot
         return snapshot
+
+    def _refresh_snapshot(self, message: Optional[str] = None) -> None:
+        """Republish the snapshot after a user command.
+
+        Enable, pause, mode switches and shutdown happen outside the frame loop,
+        so without this the interface would keep showing the previous interaction
+        for one frame after the user clicked.
+        """
+        self._snapshot = self._snapshot_for(self._now(), None, message=message)
 
     def _final_release(self) -> None:
         """Last-resort release executed at interpreter exit.

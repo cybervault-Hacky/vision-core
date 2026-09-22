@@ -28,6 +28,12 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
 * ✓ **Pinch click and drag** — one pinch equals exactly one click; holding the pinch converts it into a drag and releases the button on release
 * ✓ **Two-finger scrolling** — vertical hand movement over a deadzone scrolls the wheel; a stationary hand never scrolls
 * ✓ **Control safety layer** — explicit control states, emergency stop (stable open palm), pointer gating on `POINT`, confidence and hand-loss suspension, and a guaranteed button release on every failure path
+* ✓ **Touchless device control** — a separate device layer beside the mouse layer: system volume, mute, media playback, track skipping, display brightness where the platform exposes it, safe window actions and an allowlisted application launcher
+* ✓ **Explicit control modes** — `MOUSE` (default) and `DEVICE`, switched only by a deliberate interface action (`M` / `D` or the panel button). The two layers never both act on one gesture, and a pinch can never be both a click and a mute
+* ✓ **Continuous volume and brightness** — `TWO_FINGER` (volume) and `FIST` (brightness) vertical travel, deadzoned, rate limited, clamped to the valid operating system range and stopped the instant the hand, the gesture or the tracking confidence goes away
+* ✓ **Event media control** — `PINCH` toggles mute once per pinch cycle, `OPEN_PALM` plays or pauses once per gesture cycle, `SWIPE_RIGHT` skips forward and `SWIPE_LEFT` skips back once per swipe
+* ✓ **Allowlisted application launcher** — `BROWSER`, `CALC` and `FILES` resolved per platform from a frozen allowlist of executables. Unknown keys are rejected and no gesture, hand coordinate or gesture name can ever become a command, an argument or a shell string
+* ✓ **Honest capability reporting** — volume, media, brightness, window actions and the launcher each report `READY` or `UNAVAILABLE` from a real platform probe. Features a platform cannot provide say so instead of pretending to work
 
 * **Futuristic Boot Sequence**: Animated 2.4-second system initialization sequence probing core architecture, display subsystems, and camera hardware before entering active mode.
 * **Low-Latency Camera Pipeline**: Asynchronous background capture thread running independently of the UI thread, ensuring stutter-free rendering and zero frame drops.
@@ -68,11 +74,35 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
     | `TWO_FINGER` + vertical movement | scroll up / down |
     | `OPEN_PALM` (held ~0.8 s) | emergency stop: disable control and release everything |
 
-  * `SWIPE_LEFT` and `SWIPE_RIGHT` are recognised and displayed but deliberately perform no action in this phase.
+  * `SWIPE_LEFT` and `SWIPE_RIGHT` perform no action in `MOUSE` mode; in `DEVICE` mode they skip tracks.
   * Cursor mapping is resolution independent: the desktop geometry is read from the platform at runtime and the control region is a configurable fraction of the camera frame, so the same proportional desktop area is reachable on any screen, camera and video resolution.
   * Cursor smoothing is a separate layer from landmark smoothing, with its own time constant, speed gain and deadzone - the operating system is only called when the cursor actually needs to move.
   * Control states are always visible: `DISABLED`, `ARMED`, `ACTIVE`, `PAUSED`, `EMERGENCY_STOP`, with live indicators for `POINTER ACTIVE`, `DRAGGING`, `SCROLLING` and the measured pointer position.
   * No mouse button can ever stay pressed: hand loss, low confidence, tracking loss, pause, emergency stop, backend failure and application exit all release the button and end any drag.
+* **Device Control Pipeline**:
+  * `CAMERA -> HAND TRACKING -> LANDMARKS -> GESTURE ENGINE -> DEVICE CONTROLLER -> OS DEVICE APIS`.
+  * A separate layer (`app/controls/device.py`) that consumes gesture results and never recognises anything, so the gesture engine stays platform independent and the classifier never contains an operating system call.
+  * Every action passes the same fixed chain: control mode -> device control enabled -> safety gate (hand present, confidence above threshold) -> stable gesture -> cooldown/debounce -> platform capability -> action. Any failure means no action.
+  * Gesture mappings in `DEVICE` mode:
+
+    | Gesture | Action |
+    | --- | --- |
+    | `TWO_FINGER` + vertical movement | volume up (up) / volume down (down), continuous with a deadzone and a rate limit |
+    | `PINCH` | toggle mute, once per pinch cycle |
+    | `OPEN_PALM` (brief) | play / pause, once per gesture cycle |
+    | `OPEN_PALM` (held ~1.8 s) | emergency stop: stop every layer and cancel pending actions |
+    | `SWIPE_RIGHT` | next track, once per swipe |
+    | `SWIPE_LEFT` | previous track, once per swipe |
+    | `FIST` + vertical movement | brightness up / down, only where the platform exposes a writable backlight |
+
+  * Window actions (`MIN`, `MAX`, `SWITCH`) and the allowlisted launcher (`BROWSER`, `CALC`, `FILES`) are deliberate interface buttons, so they are always an explicit user action, never a gesture.
+  * Continuous controls are travel driven: the vertical movement of the palm anchor (wrist and middle knuckle) is accumulated, so a slow deliberate movement acts while tremor never crosses the deadzone. Detecting a pose alone never changes anything.
+  * Every action is reported as a typed result (success, action, message, timestamp, capability) and shown as a short lived notification in the `DEVICE CONTROL` panel, never as per-frame output.
+* **Platform Device Backends**:
+  * `Linux` — volume and mute through `wpctl`, `pactl` or `amixer` when one is present (falling back to `XF86` audio keys with relative steps and an honest "level not reportable" readout), brightness through a writable `/sys/class/backlight` device, media through `XF86` media keys, and window actions through EWMH over the shared X11 session. No audio tool, no backlight and no X session are each reported as their own `UNAVAILABLE` reason.
+  * `Windows` — volume and mute through the documented `IAudioEndpointVolume` COM interface, media through virtual key codes, window actions through `ShowWindow` and `Alt+Tab`, and the launcher through resolved executables. Brightness is reported `UNAVAILABLE` because no documented, dependency-free API exists for it.
+  * `Unsupported` — an explicit no-op backend: the interface reports that device control is unavailable and states why.
+  * No new dependency: `ctypes`, the standard library and the tools already on the system only. No shell, no command interpreter, no network device control.
 * **Platform Mouse Backends**:
   * `Windows` — absolute cursor positioning and wheel notches through `user32` `SendInput`, including per-monitor DPI awareness.
   * `Linux` — pointer warping through `libX11` and synthetic button/wheel events through the XTEST extension. A Wayland session without an X server is reported as unsupported instead of half working.
@@ -188,6 +218,8 @@ python3 main.py --debug
 | --- | --- |
 | `ESC` | Shut down VisionCore |
 | `C` | Enable, pause or resume mouse control |
+| `M` | Switch to `MOUSE` control mode |
+| `D` | Switch to `DEVICE` control mode |
 | `F11` | Toggle fullscreen |
 | `R` | Reconnect the camera from the recovery screen |
 
@@ -237,6 +269,17 @@ When launching VisionCore for the first time, your operating system may prompt y
   2. **Linux**: pointer and click control needs an X server (`DISPLAY` set) plus `libX11` and the XTEST extension from `libXtst`. On a pure Wayland session without XWayland this phase has no implementation and says so; running under XWayland works. Install the runtime libraries if `LIBX11 NOT INSTALLED` or `XTEST EXTENSION MISSING` is reported (`libx11-6`, `libxtst6` on Debian/Ubuntu).
   3. **Windows**: the backend needs no special permission for `SendInput` in a normal desktop session. If it is blocked (`UNAVAILABLE`), check that the application is not running under a stricter integrity level or a locked-down policy; VisionCore never attempts to bypass operating system security.
   4. **macOS and everything else**: not implemented. The interface reports the platform as unsupported rather than pretending.
+
+### Device Control Unavailable
+
+The `DEVICE CONTROL` panel always states which capability is missing, so nothing has to be guessed:
+
+* `VOLUME UNAVAILABLE` — no audio control tool was found (`wpctl`, `pactl` or `amixer` on Linux) and no X session was available for audio keys.
+* `MEDIA UNAVAILABLE` — media keys need an X session on Linux.
+* `BRIGHTNESS UNAVAILABLE` — no writable `/sys/class/backlight` device on Linux, or the platform has no documented brightness control (Windows). Brightness control is never faked.
+* `WINDOW UNAVAILABLE` — window actions need an X session with EWMH on Linux, or the Windows APIs could not be loaded.
+* `LAUNCHER UNAVAILABLE` — none of the allowlisted applications (`browser`, `calculator`, `files`) resolved to a real executable on this system.
+* Device control also requires `DEVICE` mode and an explicit enable (`[ ENABLE ]` or `[C]` for the mouse layer); until then the interface shows `DISABLED` and performs nothing.
 
 ### Gesture Not Recognised
 * **Symptom**: The `GESTURE ENGINE` panel stays on `SEARCHING` or `ANALYZING` while a hand is tracked.
@@ -300,6 +343,33 @@ Mouse control is tuned separately from gesture recognition (values are validated
 * `cursor_smoothing` sets the smoothing time constant (`0` = raw, `0.95` = heavy). `cursor_speed` scales the pointer gain and `cursor_deadzone` rejects sub-pixel tremor.
 * `mouse_control_enabled` set to `false` removes the feature entirely: the control module then reports `DISABLED IN CONFIGURATION` and `[ ENABLE ]` cannot arm it.
 
+### Device Control Configuration
+
+Device control is tuned separately and validated on load (values are clamped to safe ranges):
+
+```json
+{
+  "device_control_enabled": true,
+  "volume_sensitivity": 55.0,
+  "volume_deadzone": 0.010,
+  "volume_max_step": 8.0,
+  "volume_interval_sec": 0.07,
+  "brightness_sensitivity": 60.0,
+  "brightness_deadzone": 0.010,
+  "brightness_max_step": 10.0,
+  "device_action_cooldown": 0.80,
+  "device_emergency_stop_sec": 1.80,
+  "device_pinch_mutes": true
+}
+```
+
+* `device_control_enabled` set to `false` removes the feature entirely: the module reports `DISABLED IN CONFIGURATION` and `[ ENABLE ]` cannot arm it.
+* `volume_sensitivity` and `brightness_sensitivity` convert normalised hand travel into percent per action; `*_max_step` caps a single action so a fast gesture cannot jump the level, and `*_deadzone` is the total travel required before the first action.
+* `volume_interval_sec` is the minimum gap between two continuous actions, so one frame can never emit a burst of volume changes.
+* `device_action_cooldown` is the minimum gap between two event actions (mute, play/pause, track skip), so a still gesture or a repeated swipe result cannot retrigger.
+* `device_emergency_stop_sec` is how long `OPEN_PALM` must be held before the emergency stop, deliberately longer than the mouse layer's `0.80 s`: a brief palm is play/pause, a deliberate hold stops everything.
+* Background volume tools are selected in a fixed preference order and only ever run as `argv` lists without a shell.
+
 ### Running in Headless / CI Environments
 * If you are running on a server or remote terminal without an attached physical camera, pass `--mock-camera`:
   ```bash
@@ -317,8 +387,9 @@ VisionCore is built upon a strict **local-first** security model:
 * **No Telemetry or Tracking**: The application contains zero analytical beacons, telemetry pings, or usage tracking code.
 * **No Network Calls**: No network sockets or external HTTP requests are made during normal camera streaming.
 * **Gesture Recognition is Local Geometry**: Recognition is pure arithmetic over landmark coordinates already in memory - it cannot transmit anything and it needs no model download, account or API key.
-* **Device Control is Opt-In and Scoped**: The only operating system action in this project is a mouse action (cursor move, left button, wheel) and only while you have enabled control and are holding a pointer gesture. No keyboard event, no shortcut, no shell command, no volume, media, brightness or window management call exists anywhere in the code.
-* **No Automation of Security**: VisionCore never bypasses operating system permissions, never automates authentication and never manipulates protected system interfaces - it only sends ordinary pointer and wheel events to the session you are already using.
+* **Control is Opt-In and Scoped**: Nothing happens until you explicitly enable control *and* select a mode. `MOUSE` mode sends ordinary pointer and wheel events to the session you are already using; `DEVICE` mode sends ordinary media, volume, brightness and window messages that the desktop already understands. Both stop instantly on hand loss, low confidence, an emergency stop or shutdown.
+* **No Shell, No Commands, No Network Control**: There is no `os.system`, no `shell=True`, no command interpreter and no arbitrary command execution anywhere in the project. The only process this application may start is a fixed, validated `argv` for an application on a frozen allowlist (`browser`, `calculator`, `files`), resolved to an absolute executable path. Hand coordinates and gesture names can never become a command, an argument or a shell string, and no device action is ever taken over a network.
+* **No Automation of Security**: VisionCore never bypasses operating system permissions, never automates authentication, never escalates privileges and never manipulates protected system interfaces - it only sends the ordinary input events and device messages a user could send themselves.
 * **No Account Required**: VisionCore runs directly from your terminal with no sign-ups, accounts, or API keys.
 
 ---
@@ -346,9 +417,14 @@ vision-core/
 ├── app/controls/
 │   ├── __init__.py          # Control layer exports
 │   ├── backend.py           # Windows / Linux X11 / unsupported mouse backends
+│   ├── device.py            # DeviceController: gestures to volume, media, windows, apps
+│   ├── device_backend.py    # Windows / Linux / unsupported device backends
+│   ├── device_types.py      # Device actions, capabilities & tunable device settings
+│   ├── launcher.py          # Frozen allowlist and per-platform application resolution
 │   ├── mouse.py             # MouseController: gestures to pointer, click, drag, scroll
 │   ├── mouse_mapper.py      # Control region, screen mapping and cursor smoothing
-│   └── safety.py            # Control states, safety gates, tunable settings
+│   ├── safety.py            # Control modes, states, safety gates, tunable settings
+│   └── x11.py               # Shared X11 session: pointer, keys, windows, geometry
 │
 ├── app/gestures/
 │   ├── __init__.py          # Gesture engine package exports
@@ -383,13 +459,13 @@ Delivered:
 * ~~Real-time hand tracking with 21 landmarks per hand~~ (Phase 2)
 * ~~Gesture recognition: open palm, fist, point, pinch, two finger, swipe left/right~~ (Phase 3)
 * ~~Touchless mouse control: pointer, click, drag, scrolling, with a safety layer~~ (Phase 4)
+* ~~Touchless device control: volume, mute, media, brightness, window actions and an allowlisted launcher, in an explicit `MOUSE` / `DEVICE` mode~~ (Phase 5)
 
 Not implemented, and not claimed anywhere in the interface:
 
-* Keyboard and shortcut automation, volume, brightness, media playback.
-* Application launching, shell commands, system power control, window management.
+* Keyboard and shortcut automation, shell commands, arbitrary command execution, system power control.
 * Browser automation and right-click (a reliable two-finger pinch is not available yet, so right-click is deliberately absent rather than unreliable).
-* Swipe driven actions: `SWIPE_LEFT` / `SWIPE_RIGHT` are recognised and displayed only.
+* Device features the host does not expose: they are reported `UNAVAILABLE` per capability rather than approximated.
 
 Planned capabilities for upcoming releases:
 

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
-from app.controls import ControlAction, ControlState
+from app.controls import ControlAction, ControlMode, ControlState
 from app.gestures import Gesture, GesturePhase, GestureState
 from app.state import SubsystemState, Telemetry
 from ui.animations import PulseAnimation
@@ -45,6 +45,14 @@ def get_status_color(status: SubsystemState) -> Tuple[int, int, int]:
         return COLOR_DISABLED
     return COLOR_ERROR
 
+
+# Fallback labels for the allowlisted launcher buttons; the live labels come from
+# the launcher itself so the panel only offers applications that resolved.
+_LAUNCH_KEYS = {
+    "browser": "BROWSER",
+    "calculator": "CALC",
+    "files": "FILES",
+}
 
 # Short guidance shown while control is idle.
 _CONTROL_HINT = {
@@ -518,6 +526,231 @@ class HUDManager:
         pygame.draw.rect(surface, border, rect, 1)
         text_surf = fonts["mono_small"].render(label, True, text)
         surface.blit(text_surf, text_surf.get_rect(center=rect.center))
+
+    def draw_device_panel(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+    ) -> Dict[str, Optional[pygame.Rect]]:
+        """Render the device control module.
+
+        Returns the clickable rectangles keyed by role so the window can route
+        clicks: ``mode``, ``toggle`` and the window action and launcher buttons.
+        Controls the platform cannot provide are drawn disabled and are not
+        returned. Every row is placed from the panel height, so nothing is ever
+        written over the border at any window size.
+        """
+        self.draw_chamfer_panel(surface, rect)
+        self.draw_panel_header(surface, rect, "DEVICE CONTROL", fonts)
+
+        state = telemetry.device_state
+        accent = get_status_color(telemetry.device)
+        if state is ControlState.EMERGENCY_STOP:
+            accent = COLOR_ERROR
+
+        device_mode = telemetry.control_mode is ControlMode.DEVICE
+        capabilities = telemetry.device_capabilities
+
+        volume, volume_color = self._volume_readout(telemetry, capabilities)
+        brightness, brightness_color = self._level_readout(
+            telemetry.device_brightness, telemetry.device_brightness_known, capabilities.get("BRIGHTNESS")
+        )
+        fields = (
+            ("MODE", telemetry.control_mode.label,
+             COLOR_ICE_BLUE if device_mode else COLOR_TEXT_MUTED),
+            ("STATUS", state.label, accent),
+            ("VOLUME", volume, volume_color),
+            ("MEDIA", *self._capability_readout(capabilities.get("MEDIA"))),
+            ("BRIGHTNESS", brightness, brightness_color),
+            ("WINDOW", *self._capability_readout(capabilities.get("WINDOW"))),
+        )
+        grid_height = self._draw_field_grid(surface, rect, fields, fonts)
+
+        notice_top = rect.top + grid_height
+        buttons = self._draw_device_buttons(surface, rect, telemetry, fonts, state, device_mode)
+        topmost = buttons["launch"] or buttons["minimize"] or buttons["toggle"]
+        notice_bottom = (topmost.top - 4) if topmost is not None else (rect.bottom - 8)
+        self._draw_device_notice(surface, rect, telemetry, fonts, notice_top, notice_bottom)
+        return buttons
+
+    def _volume_readout(
+        self, telemetry: Telemetry, capabilities: Mapping[str, bool]
+    ) -> Tuple[str, Tuple[int, int, int]]:
+        """Volume text: measured level, relative counter, or honest UNAVAILABLE."""
+        if not capabilities.get("VOLUME"):
+            return "UNAVAILABLE", COLOR_DISABLED
+        if telemetry.device_volume_known and telemetry.device_volume is not None:
+            level = f"{telemetry.device_volume * 100:.0f}%"
+            if telemetry.device_muted:
+                level = f"{level} MUTED"
+            return level, COLOR_ICE_BLUE
+        steps = telemetry.device_volume_steps
+        # The platform changes the volume but cannot report the level; show the
+        # relative change rather than inventing a percentage.
+        return (f"STEP {steps:+d}" if steps else "RELATIVE"), COLOR_ICE_BLUE
+
+    @staticmethod
+    def _level_readout(
+        level: Optional[float], known: bool, supported: Optional[bool]
+    ) -> Tuple[str, Tuple[int, int, int]]:
+        if not supported:
+            return "UNAVAILABLE", COLOR_DISABLED
+        if known and level is not None:
+            return f"{level * 100:.0f}%", COLOR_ICE_BLUE
+        return "RELATIVE", COLOR_ICE_BLUE
+
+    @staticmethod
+    def _capability_readout(supported: Optional[bool]) -> Tuple[str, Tuple[int, int, int]]:
+        if supported:
+            return "READY", COLOR_ONLINE
+        return "UNAVAILABLE", COLOR_DISABLED
+
+    def _draw_field_grid(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        fields: Sequence[Tuple[str, str, Tuple[int, int, int]]],
+        fonts: Dict[str, pygame.font.Font],
+    ) -> int:
+        """Draw label/value fields in two columns and return the grid height.
+
+        Six short fields fit in three compact rows, so the module stays readable
+        in a short window while still reporting every control it owns.
+        """
+        step = 15
+        column_width = (rect.width - 32 - 12) // 2
+        top = rect.top + 40
+        for index, (label, value, color) in enumerate(fields):
+            column = index % 2
+            row = index // 2
+            x = rect.left + 16 + column * (column_width + 12)
+            y = top + row * step
+            label_surf = fonts["caption"].render(label, True, COLOR_TEXT_MUTED)
+            surface.blit(label_surf, (x, y))
+            value_surf = fonts["mono_small"].render(value, True, color)
+            value_rect = value_surf.get_rect(right=x + column_width, top=y)
+            if value_rect.left < x + label_surf.get_width() + 6:
+                value_rect.left = x + label_surf.get_width() + 6
+            surface.blit(value_surf, value_rect)
+        return 40 + step * ((len(fields) + 1) // 2) + 2
+
+    def _draw_device_notice(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+        top: int,
+        bottom: int,
+    ) -> None:
+        """Fading notification for the last device action or safety message."""
+        if bottom - top < 12:
+            return
+
+        fade = max(0.0, 1.0 - telemetry.device_action_age / 1.6)
+        if telemetry.device_suspended and telemetry.device_suspended_reason:
+            text, color, alpha = telemetry.device_suspended_reason, COLOR_STANDBY, 255
+        elif telemetry.device_message:
+            text, color, alpha = telemetry.device_message, COLOR_STANDBY, 255
+        elif telemetry.device_action_label and fade > 0.02:
+            text = telemetry.device_action_label
+            color = COLOR_ONLINE if telemetry.device_action_success else COLOR_ERROR
+            alpha = int(255 * min(1.0, fade * 1.6))
+        else:
+            return
+
+        rendered = fonts["mono_small"].render(text, True, color)
+        rendered.set_alpha(alpha)
+        surface.blit(rendered, (rect.left + 16, top))
+        if telemetry.device_action is not None and alpha > 40:
+            # Draining underline: the notification fades out on its own.
+            width = int(rendered.get_width() * min(1.0, max(fade, 0.05)))
+            pygame.draw.line(surface, color, (rect.left + 16, top + 13),
+                             (rect.left + 16 + width, top + 13), 1)
+
+    def _draw_device_buttons(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+        state: ControlState,
+        device_mode: bool,
+    ) -> Dict[str, Optional[pygame.Rect]]:
+        """Mode, enable, window action and launcher buttons, as height allows."""
+        buttons: Dict[str, Optional[pygame.Rect]] = {
+            "mode": None,
+            "toggle": None,
+            "minimize": None,
+            "maximize": None,
+            "switch": None,
+            "launch": None,
+        }
+        if rect.height < 130:
+            return buttons
+
+        mouse = pygame.mouse.get_pos()
+        gap = 8
+        enabled = telemetry.device_available
+        width = (rect.width - 32 - gap) // 2
+
+        toggle_row = pygame.Rect(rect.left + 16, rect.bottom - 32, width, 24)
+        toggle_label = (
+            "ENABLE" if state is ControlState.DISABLED
+            else "PAUSE" if state in (ControlState.ARMED, ControlState.ACTIVE)
+            else "RESUME"
+        )
+        if state is ControlState.DISABLED and not enabled:
+            toggle_label = "UNAVAILABLE"
+        mode_rect = pygame.Rect(toggle_row.left, toggle_row.top, width, 24)
+        self._draw_control_button(
+            surface, mode_rect, "MOUSE MODE" if device_mode else "DEVICE MODE", fonts,
+            enabled, mode_rect.collidepoint(mouse),
+        )
+        buttons["mode"] = mode_rect
+        toggle_rect = pygame.Rect(mode_rect.right + gap, toggle_row.top, width, 24)
+        self._draw_control_button(
+            surface, toggle_rect, toggle_label, fonts, enabled, toggle_rect.collidepoint(mouse)
+        )
+        buttons["toggle"] = toggle_rect
+
+        if rect.height < 160:
+            return buttons
+
+        window_available = bool(telemetry.device_capabilities.get("WINDOW"))
+        window_row = pygame.Rect(rect.left + 16, toggle_row.top - 26, rect.width - 32, 22)
+        cell = (window_row.width - gap * 2) // 3
+        for index, (key, label) in enumerate((("minimize", "MIN"), ("maximize", "MAX"), ("switch", "SWITCH"))):
+            cell_rect = pygame.Rect(window_row.left + index * (cell + gap), window_row.top, cell, 22)
+            if window_available:
+                self._draw_control_button(
+                    surface, cell_rect, label, fonts, enabled, cell_rect.collidepoint(mouse)
+                )
+                buttons[key] = cell_rect
+            else:
+                self._draw_control_button(surface, cell_rect, "--", fonts, False, False)
+
+        if rect.height < 186 or window_row.top - 26 < rect.top + 101:
+            return buttons
+
+        launcher_row = pygame.Rect(window_row.left, window_row.top - 26, window_row.width, 22)
+        # Only the applications this platform actually resolved are offered.
+        entries = list(telemetry.device_launchable.items())[:3] or list(_LAUNCH_KEYS.items())[:3]
+        cell = (launcher_row.width - gap * 2) // 3
+        launchable = bool(telemetry.device_capabilities.get("LAUNCHER"))
+        for index, (key, label) in enumerate(entries):
+            cell_rect = pygame.Rect(launcher_row.left + index * (cell + gap), launcher_row.top, cell, 22)
+            if launchable:
+                self._draw_control_button(
+                    surface, cell_rect, label, fonts, enabled, cell_rect.collidepoint(mouse)
+                )
+                buttons["launch"] = cell_rect if index == 0 else buttons["launch"]
+                buttons[f"launch:{key}"] = cell_rect
+            else:
+                self._draw_control_button(surface, cell_rect, "--", fonts, False, False)
+        return buttons
 
     def draw_camera_status_panel(
         self,
