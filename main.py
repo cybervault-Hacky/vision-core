@@ -18,9 +18,12 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
 def verify_python_version() -> None:
     """Ensure runtime environment meets the Python 3.10+ requirement."""
     if sys.version_info < (3, 10):
+        major = sys.version_info[0]
+        minor = sys.version_info[1]
+        micro = sys.version_info[2] if len(sys.version_info) > 2 else 0
         sys.stderr.write(
             f"ERROR: VisionCore requires Python 3.10 or newer.\n"
-            f"Detected Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}.\n"
+            f"Detected Python {major}.{minor}.{micro}.\n"
             f"Please update your Python environment.\n"
         )
         sys.exit(1)
