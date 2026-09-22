@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
+from app.hand_tracking import TrackingState
+
 
 class AppState(str, Enum):
     """High-level application lifecycle states."""
@@ -24,6 +26,9 @@ class SubsystemState(str, Enum):
     ONLINE = "ONLINE"
     CHECKING = "CHECKING"
     INITIALIZING = "INITIALIZING"
+    SEARCHING = "SEARCHING"
+    ACTIVE = "ACTIVE"
+    LOST = "LOST"
     STANDBY = "STANDBY"
     UNAVAILABLE = "UNAVAILABLE"
     ERROR = "ERROR"
@@ -51,6 +56,17 @@ class Telemetry:
     camera_index: int = 0
     mirrored: bool = True
 
+    # Hand tracking metrics (all values are measured, never simulated)
+    tracking_state: TrackingState = TrackingState.NO_HAND
+    hands_detected: int = 0
+    hand_handedness: Optional[str] = None
+    hand_confidence: Optional[float] = None
+    tracker_fps: float = 0.0
+    tracking_latency_ms: float = 0.0
+    tracking_engine: str = "MEDIAPIPE HANDS"
+    tracking_dropped_frames: int = 0
+    max_hands: int = 1
+
     # Performance telemetry
     render_fps: float = 0.0
     frame_count: int = 0
@@ -76,6 +92,16 @@ class Telemetry:
         seconds = secs % 60
         return f"{hours:02d}:{mins:02d}:{seconds:02d}"
 
+    def set_tracking_state(self, state: TrackingState) -> None:
+        """Mirror the tracker lifecycle into the subsystem matrix."""
+        self.tracking_state = state
+        if state in (TrackingState.DETECTING, TrackingState.TRACKING):
+            self.tracking = SubsystemState.ACTIVE
+        elif state is TrackingState.HAND_LOST:
+            self.tracking = SubsystemState.LOST
+        else:
+            self.tracking = SubsystemState.SEARCHING
+
     def set_camera_error(
         self,
         title: str,
@@ -85,6 +111,11 @@ class Telemetry:
         """Configure error telemetry for camera failure."""
         self.app_state = AppState.CAMERA_ERROR
         self.camera = SubsystemState.UNAVAILABLE
+        self.tracking = SubsystemState.UNAVAILABLE
+        self.tracking_state = TrackingState.NO_HAND
+        self.hands_detected = 0
+        self.hand_handedness = None
+        self.hand_confidence = None
         self.error_title = title
         self.error_message = message
         self.error_instructions = instructions or [

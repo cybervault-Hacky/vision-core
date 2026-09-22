@@ -13,12 +13,15 @@ import pygame
 
 from app.camera import CameraManager
 from app.config import AppConfig
+from app.hand_tracking import HandTracker, TrackingSnapshot
 from app.logger import setup_logger
-from app.state import AppState, Telemetry
+from app.state import AppState, SubsystemState, Telemetry
 from ui.window import MainWindow
 from utils.platform import PlatformInfo
 
 logger = logging.getLogger("visioncore.app")
+
+TRACKING_ENGINE_NAME = "MEDIAPIPE HANDS"
 
 
 class Application:
@@ -45,6 +48,7 @@ class Application:
             app_state=AppState.BOOTING,
             camera_index=self.config.camera_index,
             mirrored=self.config.mirror_camera,
+            max_hands=self.config.max_hands,
         )
 
         # Platform analysis
@@ -65,6 +69,21 @@ class Application:
             mock_mode=self.config.mock_camera,
         )
 
+        # Hand tracking engine (local inference, runs on its own worker thread)
+        self.tracker = HandTracker(
+            max_hands=self.config.max_hands,
+            model_complexity=self.config.tracking_model_complexity,
+            min_detection_confidence=self.config.min_detection_confidence,
+            min_tracking_confidence=self.config.min_tracking_confidence,
+            input_width=self.config.tracking_input_width,
+            smoothing=True,
+        )
+        self._tracking_announced = False
+        self.telemetry.tracking = SubsystemState.DISABLED
+        if self.config.tracking_enabled:
+            self.telemetry.tracking = SubsystemState.INITIALIZING
+            self.telemetry.tracking_engine = TRACKING_ENGINE_NAME
+
         # UI Window Shell
         self.window = MainWindow(
             config=self.config,
@@ -80,7 +99,7 @@ class Application:
         self._camera_probe_message = ""
 
     def _probe_camera_async(self) -> None:
-        """Asynchronously probe and initialize camera hardware during boot."""
+        """Asynchronously probe camera hardware and warm the tracking engine."""
         logger.info("Probing camera hardware at index %d...", self.config.camera_index)
         success, msg = self.camera.start()
         self._camera_probe_success = success
@@ -92,6 +111,9 @@ class Application:
 
         if success:
             logger.info("Camera probe passed: %s", msg)
+            if self.config.tracking_enabled:
+                logger.info("Starting local hand tracking pipeline...")
+                self.tracker.start()
         else:
             logger.warning("Camera probe failed: %s", msg)
 
@@ -107,6 +129,8 @@ class Application:
                 fps=self.camera.hardware_fps,
                 backend=self.camera.backend,
             )
+            if self.config.tracking_enabled and not self.tracker.is_running:
+                self.tracker.start()
             logger.info("Camera reconnected successfully!")
         else:
             hint = self.platform_info.camera_permission_hint()
@@ -120,6 +144,33 @@ class Application:
                 ],
             )
             logger.warning("Camera retry failed: %s", msg)
+
+    def _sync_tracking(self, snapshot: TrackingSnapshot) -> None:
+        """Publish measured tracking telemetry to the HUD (no simulated values)."""
+        telemetry = self.telemetry
+
+        if self.config.tracking_enabled and not self._tracking_announced:
+            if self.tracker.init_error:
+                self._tracking_announced = True
+                telemetry.tracking = SubsystemState.UNAVAILABLE
+                telemetry.tracking_engine = "UNAVAILABLE"
+                self.window.boot_screen.notify_tracking_result(False, self.tracker.init_error)
+                logger.warning("Hand tracking engine unavailable: %s", self.tracker.init_error)
+            elif self.tracker.is_ready:
+                self._tracking_announced = True
+                self.window.boot_screen.notify_tracking_result(True, "Hand tracking online")
+                logger.info("Hand tracking pipeline ready.")
+
+        if self.tracker.is_ready:
+            telemetry.set_tracking_state(snapshot.state)
+            telemetry.tracking_engine = TRACKING_ENGINE_NAME
+            primary = snapshot.primary
+            telemetry.hands_detected = len(snapshot.hands)
+            telemetry.hand_handedness = primary.handedness if primary else None
+            telemetry.hand_confidence = primary.confidence if primary else None
+            telemetry.tracker_fps = snapshot.tracker_fps
+            telemetry.tracking_latency_ms = snapshot.inference_ms
+            telemetry.tracking_dropped_frames = snapshot.dropped_frames
 
     def run(self) -> int:
         """Execute the primary desktop application loop."""
@@ -194,16 +245,22 @@ class Application:
                         if self.camera.width > 0 and self.telemetry.camera_width == 0:
                             self.telemetry.camera_width = self.camera.width
                             self.telemetry.camera_height = self.camera.height
+
+                        # Hand the frame to the tracking worker (zero copy, never blocking)
+                        self.tracker.submit_frame(frame)
                     elif not self.camera.is_active:
                         # Camera disconnected while active
                         logger.warning("Camera connection lost during active streaming")
+                        self.tracker.reset()
                         self.telemetry.set_camera_error(
                             title="CAMERA DISCONNECTED",
                             message="Camera video feed lost unexpectedly.",
                         )
 
-                # 4. Render Frame & HUD
-                self.window.render_frame(current_frame, dt)
+                # 4. Synchronise tracking telemetry and render frame + HUD
+                tracking = self.tracker.poll()
+                self._sync_tracking(tracking)
+                self.window.render_frame(current_frame, dt, tracking)
 
                 # 5. Measure and Update Render FPS
                 fps_frame_count += 1
@@ -239,6 +296,12 @@ class Application:
             self.camera.release()
         except Exception as exc:
             logger.warning("Error releasing camera during shutdown: %s", exc)
+
+        # Release hand tracking engine
+        try:
+            self.tracker.close()
+        except Exception as exc:
+            logger.warning("Error stopping hand tracking engine: %s", exc)
 
         # Close window & pygame display
         try:

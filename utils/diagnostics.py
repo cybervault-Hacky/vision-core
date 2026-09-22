@@ -34,6 +34,12 @@ class SystemDiagnostics:
         except ImportError:
             versions["pygame"] = "Not Installed"
 
+        try:
+            import mediapipe
+            versions["mediapipe"] = mediapipe.__version__
+        except ImportError:
+            versions["mediapipe"] = "Not Installed"
+
         return versions
 
     @classmethod
@@ -162,6 +168,7 @@ class SystemDiagnostics:
             f"| OpenCV Version   : {deps.get('opencv')}",
             f"| NumPy Version    : {deps.get('numpy')}",
             f"| Pygame Version   : {deps.get('pygame')}",
+            f"| MediaPipe Ver.   : {deps.get('mediapipe')}",
             "+-------------------------------------------------------------+",
             f"| Camera Index     : {cam.get('index', 0)}",
             f"| Camera Status    : {cam_status}",

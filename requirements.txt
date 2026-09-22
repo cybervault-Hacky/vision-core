@@ -1,6 +1,19 @@
 # VisionCore runtime dependencies
-# Minimal, lightweight production-grade dependencies for camera capture & desktop UI
-
-opencv-python-headless>=4.8.0
-numpy>=1.24.0
+#
+# Core capture and desktop UI
+opencv-python-headless>=4.8.0,<4.12
+numpy>=1.24.0,<2.0
 pygame>=2.5.0
+
+# On-device hand landmark tracking. MediaPipe 0.10.14 - 0.10.21 ship the
+# hand landmark model inside the package, so tracking needs no model download,
+# no account and no API key.
+#
+# Note: MediaPipe declares "opencv-contrib-python" (the GUI build) as a
+# dependency, which pip installs alongside the headless build declared above -
+# both distributions provide the same cv2 module, and the GUI build wins. On
+# Windows, macOS and desktop Linux this is harmless. On a headless Linux host
+# without libGL, restore the headless build with:
+#
+#   pip install --force-reinstall --no-deps opencv-python-headless
+mediapipe>=0.10.14,<0.11

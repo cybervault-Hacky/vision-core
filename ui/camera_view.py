@@ -6,42 +6,47 @@ import math
 import os
 from typing import Dict, Optional, Tuple
 
+import cv2
 import numpy as np
+
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
+from app.hand_tracking import TrackingSnapshot
 from app.state import Telemetry
-from ui.animations import PulseAnimation, RotationAnimation, ScanlineAnimation
+from ui.animations import PulseAnimation, RotationAnimation
+from ui.hand_overlay import HandOverlay
 from ui.hud import (
     COLOR_CYAN_PRIMARY,
     COLOR_ICE_BLUE,
     COLOR_ONLINE,
     COLOR_PANEL_BORDER,
+    COLOR_TEXT_MUTED,
     COLOR_TEXT_WHITE,
 )
 
 
 class CameraView:
-    """Renders the video viewport with aspect-ratio preservation and futuristic overlays."""
+    """Renders the video viewport with aspect-ratio preservation and HUD overlays."""
 
-    def __init__(self):
-        self.scanline = ScanlineAnimation(speed=0.35)
-        self.reticle_rot = RotationAnimation(speed_deg_per_sec=25.0)
+    def __init__(self) -> None:
+        self.reticle_rot = RotationAnimation(speed_deg_per_sec=22.0)
         self.pulse = PulseAnimation(min_val=0.4, max_val=1.0, frequency_hz=1.0)
+        self.hand_overlay = HandOverlay()
 
-        # Cached surface for scaled video frame
-        self._cached_frame_surf: Optional[pygame.Surface] = None
-        self._last_frame_shape: Optional[Tuple[int, int]] = None
-        self._last_target_size: Optional[Tuple[int, int]] = None
+        # Cached surface for the scaled video frame
+        self._last_frame_surf: Optional[pygame.Surface] = None
 
-    def update(self, dt: float) -> None:
+    def update(self, dt: float, tracking: TrackingSnapshot) -> None:
         """Advance animation states."""
-        self.scanline.update(dt)
         self.reticle_rot.update(dt)
         self.pulse.update(dt)
+        self.hand_overlay.update(dt, tracking)
 
+    # -- geometry ---------------------------------------------------------- #
+
+    @staticmethod
     def _calculate_letterbox(
-        self,
         frame_w: int,
         frame_h: int,
         container_rect: pygame.Rect,
@@ -54,13 +59,13 @@ class CameraView:
         container_aspect = container_rect.width / container_rect.height
 
         if container_aspect > frame_aspect:
-            # Container is wider: pillarbox (black bars on left/right)
+            # Container is wider: pillarbox (bars on left/right)
             scaled_h = container_rect.height
             scaled_w = int(scaled_h * frame_aspect)
             scaled_x = container_rect.x + (container_rect.width - scaled_w) // 2
             scaled_y = container_rect.y
         else:
-            # Container is taller: letterbox (black bars on top/bottom)
+            # Container is taller: letterbox (bars on top/bottom)
             scaled_w = container_rect.width
             scaled_h = int(scaled_w / frame_aspect)
             scaled_x = container_rect.x
@@ -68,8 +73,10 @@ class CameraView:
 
         return pygame.Rect(scaled_x, scaled_y, scaled_w, scaled_h)
 
+    # -- static chrome ----------------------------------------------------- #
+
+    @staticmethod
     def draw_corner_brackets(
-        self,
         surface: pygame.Surface,
         rect: pygame.Rect,
         bracket_len: int = 24,
@@ -80,82 +87,104 @@ class CameraView:
         x, y, w, h = rect.x, rect.y, rect.width, rect.height
         color = COLOR_CYAN_PRIMARY
 
-        # Top-Left Bracket
         pygame.draw.line(surface, color, (x, y), (x + b_len, y), thickness)
         pygame.draw.line(surface, color, (x, y), (x, y + b_len), thickness)
-
-        # Top-Right Bracket
         pygame.draw.line(surface, color, (x + w, y), (x + w - b_len, y), thickness)
         pygame.draw.line(surface, color, (x + w, y), (x + w, y + b_len), thickness)
-
-        # Bottom-Left Bracket
         pygame.draw.line(surface, color, (x, y + h), (x + b_len, y + h), thickness)
         pygame.draw.line(surface, color, (x, y + h), (x, y + h - b_len), thickness)
-
-        # Bottom-Right Bracket
         pygame.draw.line(surface, color, (x + w, y + h), (x + w - b_len, y + h), thickness)
         pygame.draw.line(surface, color, (x + w, y + h), (x + w, y + h - b_len), thickness)
-
-    def draw_scanning_line(
-        self,
-        surface: pygame.Surface,
-        rect: pygame.Rect,
-    ) -> None:
-        """Render a vertical sweeping laser scanline over the feed."""
-        scan_y = int(rect.y + self.scanline.position * rect.height)
-        if not (rect.y <= scan_y <= rect.bottom):
-            return
-
-        # Semi-transparent scan beam
-        beam_h = 24
-        beam_surf = pygame.Surface((rect.width, beam_h), pygame.SRCALPHA)
-        for i in range(beam_h):
-            alpha = int(45 * (1.0 - (i / beam_h)))
-            pygame.draw.line(beam_surf, (*COLOR_CYAN_PRIMARY, alpha), (0, i), (rect.width, i))
-        surface.blit(beam_surf, (rect.x, max(rect.y, scan_y - beam_h)))
-
-        # Bright leading edge
-        pygame.draw.line(surface, COLOR_CYAN_PRIMARY, (rect.x, scan_y), (rect.right, scan_y), 1)
 
     def draw_targeting_reticle(
         self,
         surface: pygame.Surface,
         center: Tuple[int, int],
-        radius: int = 36,
+        radius: int = 40,
     ) -> None:
-        """Render subtle rotating circular telemetry reticle in center."""
+        """Rotating circular telemetry reticle used while searching for a hand."""
         cx, cy = center
         angle_rad = math.radians(self.reticle_rot.angle)
-
-        # Outer subtle ring
-        reticle_surf = pygame.Surface((radius * 2 + 8, radius * 2 + 8), pygame.SRCALPHA)
         rc = radius + 4
-        pygame.draw.circle(reticle_surf, (*COLOR_CYAN_PRIMARY, 60), (rc, rc), radius, 1)
+        reticle_surf = pygame.Surface((rc * 2, rc * 2), pygame.SRCALPHA)
 
-        # Segmented arcs
-        num_segments = 4
-        arc_span = math.pi / 4
-        for i in range(num_segments):
+        pygame.draw.circle(reticle_surf, (*COLOR_CYAN_PRIMARY, 55), (rc, rc), radius, 1)
+
+        for i in range(4):
             start_a = angle_rad + i * (math.pi / 2)
-            end_a = start_a + arc_span
-            # Draw arc approximation points
-            pts = []
-            for step in range(8):
-                theta = start_a + (end_a - start_a) * (step / 7)
-                px = rc + int((radius + 2) * math.cos(theta))
-                py = rc + int((radius + 2) * math.sin(theta))
-                pts.append((px, py))
-            if len(pts) >= 2:
-                pygame.draw.lines(reticle_surf, (*COLOR_CYAN_PRIMARY, 160), False, pts, 2)
+            end_a = start_a + math.pi / 4
+            pts = [
+                (
+                    rc + int((radius + 2) * math.cos(start_a + (end_a - start_a) * (step / 7))),
+                    rc + int((radius + 2) * math.sin(start_a + (end_a - start_a) * (step / 7))),
+                )
+                for step in range(8)
+            ]
+            pygame.draw.lines(reticle_surf, (*COLOR_CYAN_PRIMARY, 150), False, pts, 2)
 
-        # Center crosshair ticks
-        tick_len = 6
-        pygame.draw.line(reticle_surf, (*COLOR_ICE_BLUE, 180), (rc - tick_len, rc), (rc - 2, rc), 1)
-        pygame.draw.line(reticle_surf, (*COLOR_ICE_BLUE, 180), (rc + 2, rc), (rc + tick_len, rc), 1)
-        pygame.draw.line(reticle_surf, (*COLOR_ICE_BLUE, 180), (rc, rc - tick_len), (rc, rc - 2), 1)
-        pygame.draw.line(reticle_surf, (*COLOR_ICE_BLUE, 180), (rc, rc + 2), (rc, rc + tick_len), 1)
+        tick = 6
+        for a, b in (
+            ((rc - tick, rc), (rc - 2, rc)),
+            ((rc + 2, rc), (rc + tick, rc)),
+            ((rc, rc - tick), (rc, rc - 2)),
+            ((rc, rc + 2), (rc, rc + tick)),
+        ):
+            pygame.draw.line(reticle_surf, (*COLOR_ICE_BLUE, 170), a, b, 1)
 
         surface.blit(reticle_surf, (cx - rc, cy - rc))
+
+    # -- surfaces ---------------------------------------------------------- #
+
+    @staticmethod
+    def _frame_to_surface(frame: np.ndarray, target_size: Tuple[int, int]) -> pygame.Surface:
+        """Convert an RGB frame into a Pygame surface scaled to the viewport.
+
+        Downscaling is delegated to OpenCV (INTER_AREA), which is cheaper and
+        produces fewer artefacts than a bilinear upscale-then-rotate style scaler.
+        """
+        source_height, source_width = frame.shape[:2]
+        target_width, target_height = target_size
+
+        if (source_width, source_height) == (target_width, target_height):
+            return pygame.image.frombuffer(frame.tobytes(), target_size, "RGB")
+
+        if target_width < source_width and target_height < source_height:
+            scaled = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+            return pygame.image.frombuffer(scaled.tobytes(), target_size, "RGB")
+
+        surface = pygame.image.frombuffer(frame.tobytes(), (source_width, source_height), "RGB")
+        return pygame.transform.smoothscale(surface, target_size)
+
+    def _overlay_badge(
+        self,
+        surface: pygame.Surface,
+        text: str,
+        font: pygame.font.Font,
+        color: Tuple[int, int, int],
+        anchor: Tuple[int, int],
+        align_right: bool = False,
+        dot_color: Optional[Tuple[int, int, int]] = None,
+    ) -> pygame.Rect:
+        """Draw a compact translucent telemetry badge."""
+        label = font.render(text, True, color)
+        padding = 8
+        dot_space = 14 if dot_color else 0
+        width = label.get_width() + padding * 2 + dot_space
+        height = label.get_height() + 8
+
+        x = anchor[0] - width if align_right else anchor[0]
+        rect = pygame.Rect(x, anchor[1], width, height)
+
+        badge = pygame.Surface((width, height), pygame.SRCALPHA)
+        badge.fill((9, 17, 27, 205))
+        pygame.draw.rect(badge, (28, 56, 84, 220), badge.get_rect(), 1)
+        if dot_color:
+            pygame.draw.circle(badge, dot_color, (padding + 3, height // 2), 4)
+        badge.blit(label, (padding + dot_space, 4))
+        surface.blit(badge, rect.topleft)
+        return rect
+
+    # -- main render ------------------------------------------------------- #
 
     def render(
         self,
@@ -164,74 +193,96 @@ class CameraView:
         frame: Optional[np.ndarray],
         telemetry: Telemetry,
         fonts: Dict[str, pygame.font.Font],
+        tracking: TrackingSnapshot,
     ) -> None:
-        """Render complete camera viewport, video surface, and HUD animations."""
-        # Dark viewport well
+        """Render the complete camera viewport, video surface, and HUD layers."""
         pygame.draw.rect(surface, (5, 8, 12), viewport_rect)
         pygame.draw.rect(surface, COLOR_PANEL_BORDER, viewport_rect, 1)
 
         fitted_rect = viewport_rect
 
         if frame is not None and frame.size > 0:
-            fh, fw = frame.shape[:2]
-            fitted_rect = self._calculate_letterbox(fw, fh, viewport_rect)
+            frame_height, frame_width = frame.shape[:2]
+            fitted_rect = self._calculate_letterbox(frame_width, frame_height, viewport_rect)
 
-            # Convert numpy array to Pygame Surface
-            frame_surf = pygame.image.frombuffer(frame.tobytes(), (fw, fh), "RGB")
+            frame_surf = self._frame_to_surface(
+                frame, (fitted_rect.width, fitted_rect.height)
+            )
+            surface.blit(frame_surf, fitted_rect.topleft)
 
-            # Scale to fit aspect-ratio preserving rectangle
-            if (fitted_rect.width, fitted_rect.height) != (fw, fh):
-                scaled_surf = pygame.transform.smoothscale(
-                    frame_surf,
-                    (fitted_rect.width, fitted_rect.height),
+            # Hand tracking layer reacts to the actual tracking state
+            self.hand_overlay.render(surface, fitted_rect, tracking, fonts)
+
+            # Ambient reticle only while the pipeline has nothing locked
+            if not tracking.state.is_engaged:
+                self.draw_targeting_reticle(
+                    surface,
+                    (fitted_rect.centerx, fitted_rect.centery),
+                    radius=40,
                 )
-            else:
-                scaled_surf = frame_surf
 
-            # Blit camera frame
-            surface.blit(scaled_surf, (fitted_rect.x, fitted_rect.y))
-
-            # Scanning animation over active feed
-            self.draw_scanning_line(surface, fitted_rect)
-
-            # Center subtle reticle
-            center = (fitted_rect.centerx, fitted_rect.centery)
-            self.draw_targeting_reticle(surface, center, radius=40)
-
-        # Frame border around the active image area
         pygame.draw.rect(surface, (18, 36, 56), fitted_rect, 1)
         self.draw_corner_brackets(surface, fitted_rect, bracket_len=26, thickness=2)
 
-        # Top Overlay: LIVE FEED badge
-        badge_rect = pygame.Rect(fitted_rect.x + 14, fitted_rect.y + 12, 140, 24)
-        badge_bg = pygame.Surface((badge_rect.width, badge_rect.height), pygame.SRCALPHA)
-        badge_bg.fill((10, 18, 28, 200))
-        surface.blit(badge_bg, badge_rect)
-        pygame.draw.rect(surface, (28, 56, 84), badge_rect, 1)
+        self._draw_viewport_badges(surface, fitted_rect, telemetry, fonts, tracking)
 
-        # Pulsing Live Dot
-        dot_color = (
+    def _draw_viewport_badges(
+        self,
+        surface: pygame.Surface,
+        fitted_rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+        tracking: TrackingSnapshot,
+    ) -> None:
+        """Live feed badge, tracking engine badge and resolution readout."""
+        live_color = (
             int(COLOR_ONLINE[0] * self.pulse.value),
             int(COLOR_ONLINE[1] * self.pulse.value),
             int(COLOR_ONLINE[2] * self.pulse.value),
         )
-        pygame.draw.circle(surface, dot_color, (badge_rect.x + 12, badge_rect.centery), 4)
+        self._overlay_badge(
+            surface,
+            "FEED // LIVE 01",
+            fonts["caption"],
+            COLOR_TEXT_WHITE,
+            (fitted_rect.x + 14, fitted_rect.y + 12),
+            dot_color=live_color,
+        )
 
-        tag_surf = fonts["caption"].render("FEED // LIVE 01", True, COLOR_TEXT_WHITE)
-        surface.blit(tag_surf, (badge_rect.x + 22, badge_rect.y + 5))
+        engine = f"{telemetry.tracking_engine} // LOCAL"
+        self._overlay_badge(
+            surface,
+            engine,
+            fonts["mono_small"],
+            COLOR_ICE_BLUE,
+            (fitted_rect.right - 14, fitted_rect.y + 12),
+            align_right=True,
+        )
 
-        # Bottom Overlay: Resolution & Aspect Info
         res_str = (
             f"CAM {telemetry.camera_index} | {telemetry.camera_width}x{telemetry.camera_height} | "
             f"{telemetry.camera_fps:.0f} FPS"
             if telemetry.camera_width > 0
             else "CAM IDLE"
         )
-        info_surf = fonts["mono_small"].render(res_str, True, COLOR_ICE_BLUE)
-        info_rect = info_surf.get_rect(right=fitted_rect.right - 14, bottom=fitted_rect.bottom - 12)
+        resolution_rect = self._overlay_badge(
+            surface,
+            res_str,
+            fonts["mono_small"],
+            COLOR_ICE_BLUE,
+            (fitted_rect.right - 14, fitted_rect.bottom - 12),
+            align_right=True,
+        )
 
-        info_bg = pygame.Surface((info_rect.width + 12, info_rect.height + 6), pygame.SRCALPHA)
-        info_bg.fill((10, 18, 28, 200))
-        surface.blit(info_bg, (info_rect.x - 6, info_rect.y - 3))
-        pygame.draw.rect(surface, (28, 56, 84), (info_rect.x - 6, info_rect.y - 3, info_rect.width + 12, info_rect.height + 6), 1)
-        surface.blit(info_surf, info_rect)
+        pipeline_str = (
+            f"LANDMARK PIPELINE | {telemetry.tracker_fps:.1f} HZ | "
+            f"{telemetry.tracking_latency_ms:.1f} MS"
+        )
+        self._overlay_badge(
+            surface,
+            pipeline_str,
+            fonts["mono_small"],
+            COLOR_TEXT_MUTED,
+            (fitted_rect.right - 14, resolution_rect.top - 6),
+            align_right=True,
+        )

@@ -32,10 +32,20 @@ def verify_python_version() -> None:
 def check_dependencies() -> None:
     """Validate that required core packages are installed before booting."""
     missing = []
+    notes = []
+
     try:
         import cv2  # noqa: F401
-    except ImportError:
+    except ImportError as exc:
         missing.append("opencv-python-headless (or opencv-python)")
+        if "libGL" in str(exc):
+            # The OpenCV GUI build needs a system OpenGL library that headless
+            # hosts do not ship. Point at the fix instead of a generic failure.
+            notes.append(
+                "OpenCV loaded a GUI build that needs libGL. Either install the "
+                "system library (Debian/Ubuntu: sudo apt install -y libgl1) or run:\n"
+                "    pip install --force-reinstall --no-deps opencv-python-headless"
+            )
 
     try:
         import numpy  # noqa: F401
@@ -47,14 +57,24 @@ def check_dependencies() -> None:
     except ImportError:
         missing.append("pygame")
 
+    try:
+        import mediapipe  # noqa: F401
+    except ImportError:
+        missing.append("mediapipe")
+
     if missing:
         sys.stderr.write(
             "\n[VISIONCORE DEPENDENCY ERROR]\n"
-            "The following required packages are missing:\n"
-            + "".join(f"  • {pkg}\n" for pkg in missing)
+            "The following required packages are missing or unusable:\n"
+            + "".join(f"  - {pkg}\n" for pkg in missing)
             + "\nPlease install required dependencies by running:\n"
-            "  pip install -r requirements.txt\n\n"
+            "  pip install -r requirements.txt\n"
         )
+        if notes:
+            sys.stderr.write(
+                "\nAdditional note:\n  " + "\n  ".join(notes) + "\n"
+            )
+        sys.stderr.write("\n")
         sys.exit(1)
 
 
@@ -79,6 +99,17 @@ def parse_args() -> argparse.Namespace:
         "--mock-camera",
         action="store_true",
         help="Use synthetic calibration stream instead of physical camera hardware.",
+    )
+    parser.add_argument(
+        "--max-hands",
+        type=int,
+        default=None,
+        help="Maximum number of simultaneously tracked hands (default: 1, max: 4).",
+    )
+    parser.add_argument(
+        "--no-tracking",
+        action="store_true",
+        help="Run the camera HUD without the local hand tracking pipeline.",
     )
     parser.add_argument(
         "--debug",
@@ -108,6 +139,11 @@ def main() -> int:
         config = AppConfig.load()
         if args.camera_index is not None:
             config.camera_index = args.camera_index
+        if args.max_hands is not None:
+            config.max_hands = args.max_hands
+            config.validate()
+        if args.no_tracking:
+            config.tracking_enabled = False
         if args.mock_camera:
             config.mock_camera = True
         if args.debug:

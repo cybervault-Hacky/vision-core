@@ -32,6 +32,14 @@ class AppConfig:
     min_window_height: int = 600
     fullscreen: bool = False
 
+    # Hand tracking settings
+    tracking_enabled: bool = True
+    max_hands: int = 1
+    tracking_model_complexity: int = 0      # 0 = lite (fast), 1 = full (accurate)
+    tracking_input_width: int = 640         # inference downscale target, 0 = native
+    min_detection_confidence: float = 0.5
+    min_tracking_confidence: float = 0.5
+
     # Boot & UI settings
     boot_duration_sec: float = 2.4
     show_debug: bool = False
@@ -71,6 +79,33 @@ class AppConfig:
             self.boot_duration_sec = 0.5
         elif self.boot_duration_sec > 10.0:
             self.boot_duration_sec = 10.0
+
+        if not (1 <= self.max_hands <= 4):
+            clamped = max(1, min(4, self.max_hands))
+            logger.warning(
+                "max_hands %d out of bounds [1, 4]; clamping to %d", self.max_hands, clamped
+            )
+            self.max_hands = clamped
+
+        if self.tracking_model_complexity not in (0, 1):
+            logger.warning(
+                "tracking_model_complexity must be 0 or 1; resetting to 0"
+            )
+            self.tracking_model_complexity = 0
+
+        if self.tracking_input_width < 0:
+            self.tracking_input_width = 0
+        elif 0 < self.tracking_input_width < 240:
+            self.tracking_input_width = 240
+
+        for name, value in (
+            ("min_detection_confidence", self.min_detection_confidence),
+            ("min_tracking_confidence", self.min_tracking_confidence),
+        ):
+            if not (0.05 <= value <= 0.95):
+                clamped = max(0.05, min(0.95, value))
+                logger.warning("%s %.2f out of bounds [0.05, 0.95]; clamping to %.2f", name, value, clamped)
+                setattr(self, name, clamped)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AppConfig:
