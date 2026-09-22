@@ -2,9 +2,9 @@
 
 **VisionCore** is a high-performance, local-first computer vision framework designed for touchless device control using standard webcam hardware and real-time computer vision.
 
-It delivers a rock-solid desktop application architecture, a hardware camera capture pipeline, non-blocking asynchronous streaming, on-device hand landmark tracking, a geometry based real-time gesture recognition engine, and a sci-fi inspired AI vision heads-up display (HUD).
+It delivers a rock-solid desktop application architecture, a hardware camera capture pipeline, non-blocking asynchronous streaming, on-device hand landmark tracking, a geometry based real-time gesture recognition engine, opt-in touchless pointer control with a full safety layer, and a sci-fi inspired AI vision heads-up display (HUD).
 
-> **Device control is not enabled.** VisionCore recognises gestures and visualises them; it does not move the mouse, click, type, change the volume or control media. Gestures currently produce data and HUD feedback only.
+> **Mouse control is opt-in.** VisionCore can drive the operating system pointer with the `POINT`, `PINCH` and `TWO_FINGER` gestures, but control always starts `DISABLED` on every launch and only moves the cursor after you enable it from the HUD (or with `C`). Keyboard, volume, media, shell and window control are **not** implemented.
 
 ---
 
@@ -24,6 +24,10 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
 * ✓ **Fist detection** — curled-finger evidence from every finger, independent of where the hand sits in frame
 * ✓ **Two-finger detection** — index and middle extended, ring and pinky folded, kept exclusive from `POINT`
 * ✓ **Swipe detection** — temporal left/right swipes from a bounded motion history with distance, velocity, direction-consistency, settle and cooldown checks
+* ✓ **Touchless pointer control** — the index fingertip drives the operating system cursor through a configurable control region, with independent cursor smoothing, speed and deadzone
+* ✓ **Pinch click and drag** — one pinch equals exactly one click; holding the pinch converts it into a drag and releases the button on release
+* ✓ **Two-finger scrolling** — vertical hand movement over a deadzone scrolls the wheel; a stationary hand never scrolls
+* ✓ **Control safety layer** — explicit control states, emergency stop (stable open palm), pointer gating on `POINT`, confidence and hand-loss suspension, and a guaranteed button release on every failure path
 
 * **Futuristic Boot Sequence**: Animated 2.4-second system initialization sequence probing core architecture, display subsystems, and camera hardware before entering active mode.
 * **Low-Latency Camera Pipeline**: Asynchronous background capture thread running independently of the UI thread, ensuring stutter-free rendering and zero frame drops.
@@ -50,8 +54,32 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
 * **Resilient Error Recovery**:
   * Automatic detection of camera absence, permission rejections, and hardware locks.
   * Polished user-facing recovery screen with interactive `[ RETRY CAMERA ]` and `[ EXIT SYSTEM ]` controls.
-  * Keyboard accelerators (`R` to retry, `ESC` to quit, `F11` for fullscreen).
+  * Keyboard accelerators (`C` to enable/pause mouse control, `R` to retry the camera, `F11` for fullscreen, `ESC` to quit).
+* **Mouse Control Pipeline**:
+  * `CAMERA -> HAND TRACKING -> LANDMARKS -> GESTURE ENGINE -> MOUSE CONTROLLER -> OS CURSOR`.
+  * The gesture engine never touches an operating system API: it produces results, and a separate control layer (`app/controls/`) decides whether acting on them is safe.
+  * Gesture mappings:
+
+    | Gesture | Action |
+    | --- | --- |
+    | `POINT` | engage the pointer and move the cursor with the index fingertip |
+    | `POINT` + `PINCH` | one left click per pinch cycle |
+    | `POINT` + `PINCH` held | drag, released when the pinch ends or trust is lost |
+    | `TWO_FINGER` + vertical movement | scroll up / down |
+    | `OPEN_PALM` (held ~0.8 s) | emergency stop: disable control and release everything |
+
+  * `SWIPE_LEFT` and `SWIPE_RIGHT` are recognised and displayed but deliberately perform no action in this phase.
+  * Cursor mapping is resolution independent: the desktop geometry is read from the platform at runtime and the control region is a configurable fraction of the camera frame, so the same proportional desktop area is reachable on any screen, camera and video resolution.
+  * Cursor smoothing is a separate layer from landmark smoothing, with its own time constant, speed gain and deadzone - the operating system is only called when the cursor actually needs to move.
+  * Control states are always visible: `DISABLED`, `ARMED`, `ACTIVE`, `PAUSED`, `EMERGENCY_STOP`, with live indicators for `POINTER ACTIVE`, `DRAGGING`, `SCROLLING` and the measured pointer position.
+  * No mouse button can ever stay pressed: hand loss, low confidence, tracking loss, pause, emergency stop, backend failure and application exit all release the button and end any drag.
+* **Platform Mouse Backends**:
+  * `Windows` — absolute cursor positioning and wheel notches through `user32` `SendInput`, including per-monitor DPI awareness.
+  * `Linux` — pointer warping through `libX11` and synthetic button/wheel events through the XTEST extension. A Wayland session without an X server is reported as unsupported instead of half working.
+  * `Unsupported` — an explicit no-op backend: the interface reports that control is unavailable and explains why instead of silently failing.
+  * No new dependency: the backends use the standard library `ctypes` only.
 * **Local Gesture Engine**: Pure-Python geometry over the tracking output - a few hundred floating point operations per hand per frame, no second neural network, no added latency, no image processing.
+* **Local Mouse Controller**: The control pass costs well under a millisecond per frame and issues no operating system call unless the cursor or a button state actually changes.
 * **System Diagnostics**: Built-in CLI telemetry inspection (`--diagnostics`) reporting OS, Python version, display server, OpenCV backend, and camera capabilities.
 * **Zero Cloud Dependency**: 100% offline, local-first processing. Hand landmarks are computed locally from in-memory frames that are never written to disk, uploaded, recorded or transmitted. No model download, no account and no API key are required.
 
@@ -159,6 +187,7 @@ python3 main.py --debug
 | Key | Action |
 | --- | --- |
 | `ESC` | Shut down VisionCore |
+| `C` | Enable, pause or resume mouse control |
 | `F11` | Toggle fullscreen |
 | `R` | Reconnect the camera from the recovery screen |
 
@@ -201,6 +230,14 @@ When launching VisionCore for the first time, your operating system may prompt y
   pip install --force-reinstall --no-deps opencv-python-headless
   ```
 
+### Mouse Control Unavailable
+* **Symptom**: `[ ENABLE ]` reports `UNAVAILABLE`, or the control module shows `NO X DISPLAY SERVER` / `PERMISSION REQUIRED`.
+* **Fix**:
+  1. Confirm which backend was detected in the log line `Mouse control backend '...' ready|unavailable: ...`. The short reason is also shown in the `MOUSE CONTROL` module.
+  2. **Linux**: pointer and click control needs an X server (`DISPLAY` set) plus `libX11` and the XTEST extension from `libXtst`. On a pure Wayland session without XWayland this phase has no implementation and says so; running under XWayland works. Install the runtime libraries if `LIBX11 NOT INSTALLED` or `XTEST EXTENSION MISSING` is reported (`libx11-6`, `libxtst6` on Debian/Ubuntu).
+  3. **Windows**: the backend needs no special permission for `SendInput` in a normal desktop session. If it is blocked (`UNAVAILABLE`), check that the application is not running under a stricter integrity level or a locked-down policy; VisionCore never attempts to bypass operating system security.
+  4. **macOS and everything else**: not implemented. The interface reports the platform as unsupported rather than pretending.
+
 ### Gesture Not Recognised
 * **Symptom**: The `GESTURE ENGINE` panel stays on `SEARCHING` or `ANALYZING` while a hand is tracked.
 * **Fix**:
@@ -239,6 +276,30 @@ Gesture recognition is tuned through `config.json` (all values are validated and
 
 `pinch_threshold` is a ratio (thumb-to-index tip separation divided by palm scale), not a pixel count, so it does not change when the hand moves closer to or further from the camera.
 
+### Mouse Control Configuration
+
+Mouse control is tuned separately from gesture recognition (values are validated and clamped on load):
+
+```json
+{
+  "mouse_control_enabled": true,
+  "cursor_smoothing": 0.55,
+  "cursor_speed": 1.0,
+  "cursor_deadzone": 0.006,
+  "control_region_margin": 0.15,
+  "click_cooldown": 0.45,
+  "drag_hold_sec": 0.30,
+  "scroll_sensitivity": 8.0,
+  "scroll_deadzone": 0.015,
+  "safety_confidence_threshold": 0.45,
+  "emergency_stop_sec": 0.80
+}
+```
+
+* `control_region_margin` insets the active area: `0.15` means the outer 15% of the camera frame is ignored, so the cursor is not lost at the edges of the picture. This is the calibration knob of this phase.
+* `cursor_smoothing` sets the smoothing time constant (`0` = raw, `0.95` = heavy). `cursor_speed` scales the pointer gain and `cursor_deadzone` rejects sub-pixel tremor.
+* `mouse_control_enabled` set to `false` removes the feature entirely: the control module then reports `DISABLED IN CONFIGURATION` and `[ ENABLE ]` cannot arm it.
+
 ### Running in Headless / CI Environments
 * If you are running on a server or remote terminal without an attached physical camera, pass `--mock-camera`:
   ```bash
@@ -256,7 +317,8 @@ VisionCore is built upon a strict **local-first** security model:
 * **No Telemetry or Tracking**: The application contains zero analytical beacons, telemetry pings, or usage tracking code.
 * **No Network Calls**: No network sockets or external HTTP requests are made during normal camera streaming.
 * **Gesture Recognition is Local Geometry**: Recognition is pure arithmetic over landmark coordinates already in memory - it cannot transmit anything and it needs no model download, account or API key.
-* **No Device Control**: Gesture results are drawn on screen and nothing else. No input device is touched, no shell command is run and no operating system API for mouse, keyboard, volume or media is imported anywhere in the project.
+* **Device Control is Opt-In and Scoped**: The only operating system action in this project is a mouse action (cursor move, left button, wheel) and only while you have enabled control and are holding a pointer gesture. No keyboard event, no shortcut, no shell command, no volume, media, brightness or window management call exists anywhere in the code.
+* **No Automation of Security**: VisionCore never bypasses operating system permissions, never automates authentication and never manipulates protected system interfaces - it only sends ordinary pointer and wheel events to the session you are already using.
 * **No Account Required**: VisionCore runs directly from your terminal with no sign-ups, accounts, or API keys.
 
 ---
@@ -280,6 +342,13 @@ vision-core/
 │   ├── hand_tracking.py     # Hand tracking worker, landmark model & smoothing
 │   ├── logger.py            # Clean, formatted console logging
 │   └── state.py             # Lifecycle state machine & telemetry models
+│
+├── app/controls/
+│   ├── __init__.py          # Control layer exports
+│   ├── backend.py           # Windows / Linux X11 / unsupported mouse backends
+│   ├── mouse.py             # MouseController: gestures to pointer, click, drag, scroll
+│   ├── mouse_mapper.py      # Control region, screen mapping and cursor smoothing
+│   └── safety.py            # Control states, safety gates, tunable settings
 │
 ├── app/gestures/
 │   ├── __init__.py          # Gesture engine package exports
@@ -313,14 +382,22 @@ Delivered:
 
 * ~~Real-time hand tracking with 21 landmarks per hand~~ (Phase 2)
 * ~~Gesture recognition: open palm, fist, point, pinch, two finger, swipe left/right~~ (Phase 3)
+* ~~Touchless mouse control: pointer, click, drag, scrolling, with a safety layer~~ (Phase 4)
+
+Not implemented, and not claimed anywhere in the interface:
+
+* Keyboard and shortcut automation, volume, brightness, media playback.
+* Application launching, shell commands, system power control, window management.
+* Browser automation and right-click (a reliable two-finger pinch is not available yet, so right-click is deliberately absent rather than unreliable).
+* Swipe driven actions: `SWIPE_LEFT` / `SWIPE_RIGHT` are recognised and displayed only.
 
 Planned capabilities for upcoming releases:
 
-* Touchless desktop control (mouse movement, clicking, scrolling, volume, and media gestures) - **not implemented yet**.
 * Gesture profile customization, sensitivity curves, and custom action mapping.
+* Interactive pointer calibration on top of the configuration based control region.
 * Depth-aware features that use the landmark `z` estimate once it is reliable enough.
 
-*(Note: the HUD reports `GESTURES` as active because recognition really does run, while `CONTROL` stays `DISABLED` because no device control exists. This is deliberate: the interface never claims capability the application does not have.)*
+*(Note: the HUD reports `CONTROL` as `DISABLED`, `STANDBY`, `ACTIVE` or `ERROR` to match the real control state, so the interface never claims a capability the application does not currently have.)*
 
 ---
 

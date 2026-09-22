@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
+from app.controls.safety import (
+    ControlAction,
+    ControlSnapshot,
+    ControlState,
+)
 from app.gestures.types import (
     Gesture,
     GesturePhase,
@@ -41,6 +46,17 @@ class SubsystemState(str, Enum):
     DISABLED = "DISABLED"
 
 
+# Truthful subsystem reporting for the control layer: enabled states are shown
+# in amber, an engaged pointer in mint, a tripped safety stop in red.
+_CONTROL_SUBSYSTEM = {
+    ControlState.DISABLED: SubsystemState.DISABLED,
+    ControlState.ARMED: SubsystemState.STANDBY,
+    ControlState.ACTIVE: SubsystemState.ACTIVE,
+    ControlState.PAUSED: SubsystemState.STANDBY,
+    ControlState.EMERGENCY_STOP: SubsystemState.ERROR,
+}
+
+
 @dataclass
 class Telemetry:
     """Live telemetry and status data consumed by HUD and diagnostics."""
@@ -61,6 +77,23 @@ class Telemetry:
     camera_backend: str = "UNKNOWN"
     camera_index: int = 0
     mirrored: bool = True
+
+    # Mouse control metrics (real state and real counters only)
+    control_state: ControlState = ControlState.DISABLED
+    control_message: str = ""
+    control_backend: str = "UNSUPPORTED"
+    control_available: bool = False
+    control_action: ControlAction = ControlAction.NONE
+    control_action_age: float = 0.0
+    control_suspended: bool = False
+    pointer_active: bool = False
+    pointer_dragging: bool = False
+    pointer_scrolling: bool = False
+    pointer_x: Optional[float] = None
+    pointer_y: Optional[float] = None
+    control_clicks: int = 0
+    control_scroll_events: int = 0
+    control_emergency_stops: int = 0
 
     # Gesture recognition metrics (geometry derived, never simulated)
     gesture: Gesture = Gesture.NONE
@@ -145,6 +178,43 @@ class Telemetry:
             self.gestures = SubsystemState.SEARCHING
         else:
             self.gestures = SubsystemState.ONLINE
+
+    def update_control(self, snapshot: ControlSnapshot) -> None:
+        """Mirror a mouse control snapshot into the telemetry model."""
+        self.control_state = snapshot.state
+        self.control_message = snapshot.message
+        self.control_backend = snapshot.backend
+        self.control_available = snapshot.available
+        self.control_action = snapshot.action
+        self.control_action_age = snapshot.action_age
+        self.control_suspended = snapshot.suspended
+        self.pointer_active = snapshot.pointer_active
+        self.pointer_dragging = snapshot.dragging
+        self.pointer_scrolling = snapshot.scrolling
+        self.control_clicks = snapshot.clicks
+        self.control_scroll_events = snapshot.scroll_events
+        self.control_emergency_stops = snapshot.emergency_stops
+
+        screen = snapshot.screen
+        if snapshot.pointer_active and screen is not None:
+            self.pointer_x = screen[0]
+            self.pointer_y = screen[1]
+        else:
+            self.pointer_x = None
+            self.pointer_y = None
+
+        self.control = _CONTROL_SUBSYSTEM[snapshot.state]
+
+    def set_control_unavailable(self) -> None:
+        """Mark device control as not running (shutdown / camera loss)."""
+        self.control_state = ControlState.DISABLED
+        self.control_action = ControlAction.NONE
+        self.pointer_active = False
+        self.pointer_dragging = False
+        self.pointer_scrolling = False
+        self.pointer_x = None
+        self.pointer_y = None
+        self.control = SubsystemState.DISABLED
 
     def set_gestures_unavailable(self) -> None:
         """Mark gesture recognition as not running (disabled or unavailable)."""

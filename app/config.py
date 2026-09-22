@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-if TYPE_CHECKING:  # imported lazily in gesture_settings() to keep imports shallow
+if TYPE_CHECKING:  # imported lazily in the settings builders to keep imports shallow
+    from app.controls.safety import ControlSettings
     from app.gestures.types import GestureSettings
 
 logger = logging.getLogger("visioncore.config")
@@ -29,8 +30,8 @@ class AppConfig:
 
     # Display & UI settings
     window_title: str = "VISIONCORE // ADVANCED VISION SYSTEM"
-    window_width: int = 1024
-    window_height: int = 700
+    window_width: int = 1100
+    window_height: int = 820
     min_window_width: int = 800
     min_window_height: int = 600
     fullscreen: bool = False
@@ -55,6 +56,19 @@ class AppConfig:
     swipe_velocity_threshold: float = 0.60       # normalised units per second
     swipe_cooldown: float = 0.70                 # seconds between swipes
     swipe_window_sec: float = 0.40               # motion history window
+
+    # Touchless mouse control (opt-in: control always starts disabled)
+    mouse_control_enabled: bool = True
+    cursor_smoothing: float = 0.55               # 0 = raw, 1 = heavy damping
+    cursor_speed: float = 1.0                    # pointer gain
+    cursor_deadzone: float = 0.006               # normalised jitter rejection
+    control_region_margin: float = 0.15          # frame border excluded from control
+    click_cooldown: float = 0.45                 # seconds between two clicks
+    drag_hold_sec: float = 0.30                  # pinch hold that starts a drag
+    scroll_sensitivity: float = 8.0              # wheel notches per normalised unit
+    scroll_deadzone: float = 0.015               # ignores tremor while scrolling
+    safety_confidence_threshold: float = 0.45    # below this, actions are suspended
+    emergency_stop_sec: float = 0.80             # stable open palm before the stop
 
     # Boot & UI settings
     boot_duration_sec: float = 2.4
@@ -140,6 +154,16 @@ class AppConfig:
             self.pinch_release_threshold = self.pinch_threshold + 0.13
 
         for name, low, high in (
+            ("cursor_smoothing", 0.0, 0.95),
+            ("cursor_speed", 0.20, 3.0),
+            ("cursor_deadzone", 0.0, 0.10),
+            ("control_region_margin", 0.0, 0.40),
+            ("click_cooldown", 0.05, 3.0),
+            ("drag_hold_sec", 0.15, 2.0),
+            ("scroll_sensitivity", 0.5, 25.0),
+            ("scroll_deadzone", 0.0, 0.20),
+            ("safety_confidence_threshold", 0.05, 0.95),
+            ("emergency_stop_sec", 0.20, 5.0),
             ("swipe_distance_threshold", 0.05, 0.90),
             ("swipe_velocity_threshold", 0.10, 6.0),
             ("swipe_cooldown", 0.05, 3.0),
@@ -150,6 +174,24 @@ class AppConfig:
                 clamped = max(low, min(high, value))
                 logger.warning("%s %.2f out of bounds [%.2f, %.2f]; clamping to %.2f", name, value, low, high, clamped)
                 setattr(self, name, clamped)
+
+    def control_settings(self) -> "ControlSettings":
+        """Build the mouse control settings from the application configuration."""
+        from app.controls.safety import ControlSettings
+
+        return ControlSettings(
+            enabled=self.mouse_control_enabled and self.gesture_enabled and self.tracking_enabled,
+            cursor_smoothing=self.cursor_smoothing,
+            cursor_speed=self.cursor_speed,
+            cursor_deadzone=self.cursor_deadzone,
+            control_region_margin=self.control_region_margin,
+            click_cooldown_sec=self.click_cooldown,
+            drag_hold_sec=self.drag_hold_sec,
+            scroll_sensitivity=self.scroll_sensitivity,
+            scroll_deadzone=self.scroll_deadzone,
+            safety_confidence_threshold=self.safety_confidence_threshold,
+            emergency_stop_sec=self.emergency_stop_sec,
+        ).clamped()
 
     def gesture_settings(self) -> "GestureSettings":
         """Build the gesture engine settings from the application configuration."""

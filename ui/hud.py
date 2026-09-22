@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
+from app.controls import ControlAction, ControlState
 from app.gestures import Gesture, GesturePhase, GestureState
 from app.state import SubsystemState, Telemetry
 from ui.animations import PulseAnimation
@@ -23,7 +24,7 @@ COLOR_TEXT_MUTED = (120, 145, 170)
 
 # Minimum pixel spacing between metric rows; below this the layout drops
 # supplementary rows instead of overlapping them.
-MIN_ROW_STEP = 13
+MIN_ROW_STEP = 12
 
 COLOR_ONLINE = (0, 245, 160)      # Mint green
 COLOR_STANDBY = (255, 183, 3)     # Amber
@@ -43,6 +44,16 @@ def get_status_color(status: SubsystemState) -> Tuple[int, int, int]:
     if status is SubsystemState.DISABLED:
         return COLOR_DISABLED
     return COLOR_ERROR
+
+
+# Short guidance shown while control is idle.
+_CONTROL_HINT = {
+    ControlState.DISABLED: "POINT TO CONTROL",
+    ControlState.ARMED: "POINT TO ENGAGE",
+    ControlState.ACTIVE: "PINCH CLICK / HOLD DRAG",
+    ControlState.PAUSED: "TRACKING CONTINUES",
+    ControlState.EMERGENCY_STOP: "OPEN PALM STOPPED IT",
+}
 
 
 class HUDManager:
@@ -117,20 +128,17 @@ class HUDManager:
         rect: pygame.Rect,
         rows: Sequence[Tuple[str, str, Tuple[int, int, int]]],
         fonts: Dict[str, pygame.font.Font],
-        optional_from: Optional[int] = None,
     ) -> None:
         """Draw label/value rows with spacing that adapts to the panel height.
 
-        When the panel cannot fit every row, the rows from ``optional_from``
-        onwards are dropped rather than squeezed into an unreadable stack. Rows
-        before that index are always rendered because they carry the primary
-        telemetry of the panel.
+        The row count is clamped to what the panel can show, so a short window
+        hides supplementary rows instead of writing them over the panel border or
+        the diagnostics footer.
         """
         top = rect.top + 46
         available = max(1, (rect.bottom - 10) - top)
         capacity = max(1, available // MIN_ROW_STEP)
-        if optional_from is not None and len(rows) > capacity >= optional_from:
-            rows = rows[:capacity]
+        rows = rows[:capacity]
         step = max(MIN_ROW_STEP, min(24, available // max(1, len(rows))))
         y = top
 
@@ -213,7 +221,7 @@ class HUDManager:
         left_surf = fonts["mono_small"].render(left_text, True, COLOR_TEXT_MUTED)
         surface.blit(left_surf, (rect.left + 16, rect.top + 7))
 
-        right_text = "[ESC] SHUTDOWN  |  [F11] FULLSCREEN  |  [R] RECONNECT"
+        right_text = "[C] CONTROL  |  [F11] FULLSCREEN  |  [R] RECONNECT  |  [ESC] SHUTDOWN"
         right_surf = fonts["mono_small"].render(right_text, True, COLOR_CYAN_PRIMARY)
         right_rect = right_surf.get_rect(right=rect.right - 16, centery=rect.top + 14)
         surface.blit(right_surf, right_rect)
@@ -245,6 +253,8 @@ class HUDManager:
 
         top = rect.top + 46
         available = max(1, (rect.bottom - 10) - top)
+        capacity = max(1, available // MIN_ROW_STEP)
+        rows = rows[:capacity]
         step = max(MIN_ROW_STEP, min(24, available // max(1, len(rows))))
         y = top
 
@@ -300,7 +310,7 @@ class HUDManager:
         if telemetry.tracking_dropped_frames > 0:
             rows.append(("DROPPED", str(telemetry.tracking_dropped_frames), COLOR_STANDBY))
 
-        self.draw_metric_rows(surface, rect, rows, fonts, optional_from=4)
+        self.draw_metric_rows(surface, rect, rows, fonts)
 
     def draw_gesture_panel(
         self,
@@ -364,7 +374,150 @@ class HUDManager:
         ]
 
         body = pygame.Rect(rect.x, rect.y + 32, rect.width, rect.height - 32)
-        self.draw_metric_rows(surface, body, rows, fonts, optional_from=2)
+        self.draw_metric_rows(surface, body, rows, fonts)
+
+    def draw_control_panel(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+    ) -> Tuple[Optional[pygame.Rect], Optional[pygame.Rect]]:
+        """Render the mouse control module.
+
+        Returns the rectangles of the two interactive controls (primary toggle and
+        disable) so the window can route clicks to them, or ``(None, None)`` when
+        the panel is too small to host them.
+        """
+        self.draw_chamfer_panel(surface, rect)
+        self.draw_panel_header(surface, rect, "MOUSE CONTROL", fonts)
+
+        state = telemetry.control_state
+        accent = get_status_color(telemetry.control)
+
+        headline = state.label
+        if state is ControlState.EMERGENCY_STOP:
+            accent = COLOR_ERROR
+
+        headline_surf = fonts["subheading"].render(headline, True, accent)
+        surface.blit(headline_surf, (rect.left + 16, rect.top + 44))
+        pygame.draw.circle(
+            surface,
+            tuple(int(c * self._pulse.value) for c in accent),
+            (rect.right - 22, rect.top + 54),
+            int(4 + 2 * self._pulse.value),
+        )
+
+        # Live indicator: what the control layer is doing right now.
+        if telemetry.pointer_dragging:
+            indicator, indicator_color = "DRAGGING", COLOR_ONLINE
+        elif telemetry.pointer_scrolling:
+            indicator, indicator_color = "SCROLLING", COLOR_ONLINE
+        elif telemetry.pointer_active:
+            indicator, indicator_color = "POINTER ACTIVE", COLOR_ONLINE
+        elif telemetry.control_suspended:
+            indicator, indicator_color = "SUSPENDED", COLOR_STANDBY
+        elif state is ControlState.PAUSED:
+            indicator, indicator_color = "PAUSED", COLOR_STANDBY
+        elif state is ControlState.ARMED:
+            indicator, indicator_color = "READY", COLOR_STANDBY
+        else:
+            indicator, indicator_color = "CONTROL INACTIVE", COLOR_DISABLED
+
+        indicator_surf = fonts["mono_small"].render(indicator, True, indicator_color)
+        surface.blit(indicator_surf, (rect.left + 16, rect.top + 66))
+
+        # Secondary line: the last real action, the safety reason or a backend hint.
+        if telemetry.control_message:
+            note, note_color = telemetry.control_message, COLOR_STANDBY
+        elif telemetry.control_action is not ControlAction.NONE:
+            note = telemetry.control_action.value
+            note_color = COLOR_ICE_BLUE
+        else:
+            note = _CONTROL_HINT.get(state, "")
+            note_color = COLOR_TEXT_MUTED
+        if note:
+            note_surf = fonts["mono_small"].render(note, True, note_color)
+            surface.blit(note_surf, (rect.left + 16, rect.top + 84))
+
+        # Pointer coordinates (measured, hidden while the pointer is not engaged).
+        if (
+            rect.height >= 128
+            and telemetry.pointer_x is not None
+            and telemetry.pointer_y is not None
+        ):
+            pointer = f"X {telemetry.pointer_x:.2f}  Y {telemetry.pointer_y:.2f}"
+            pointer_surf = fonts["mono_small"].render(pointer, True, COLOR_TEXT_MUTED)
+            surface.blit(pointer_surf, (rect.left + 16, rect.top + 102))
+
+        return self._draw_control_buttons(surface, rect, telemetry, fonts, state)
+
+    def _draw_control_buttons(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+        state: ControlState,
+    ) -> Tuple[Optional[pygame.Rect], Optional[pygame.Rect]]:
+        """Clickable control rectangles: primary toggle plus an explicit disable."""
+        # The controls are reserved space at the bottom of the module: they must
+        # stay clickable even when the window is short.
+        top = rect.bottom - 34
+        if rect.height < 112:
+            return None, None
+
+        disabled = state is ControlState.DISABLED
+        two_buttons = not disabled
+        gap = 8
+        width = rect.width - 32 if not two_buttons else (rect.width - 32 - gap) // 2
+        primary = pygame.Rect(rect.left + 16, top, width, 26)
+        secondary = pygame.Rect(primary.right + gap, top, width, 26) if two_buttons else None
+
+        mouse = pygame.mouse.get_pos()
+        enabled = telemetry.control_available
+        if disabled:
+            label = "ENABLE" if enabled else "UNAVAILABLE"
+        elif state in (ControlState.ARMED, ControlState.ACTIVE):
+            label = "PAUSE"
+        else:
+            label = "RESUME"
+
+        self._draw_control_button(
+            surface, primary, label, fonts, enabled, primary.collidepoint(mouse)
+        )
+        if secondary is not None:
+            self._draw_control_button(
+                surface, secondary, "DISABLE", fonts, True, secondary.collidepoint(mouse)
+            )
+        return primary, secondary
+
+    @staticmethod
+    def _draw_control_button(
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        label: str,
+        fonts: Dict[str, pygame.font.Font],
+        enabled: bool,
+        hovered: bool = False,
+    ) -> None:
+        """Small flat control button matching the interface language."""
+        if not enabled:
+            border = COLOR_DISABLED
+            text = COLOR_DISABLED
+            background = (10, 16, 24)
+        elif hovered:
+            border = COLOR_CYAN_PRIMARY
+            text = COLOR_TEXT_WHITE
+            background = (18, 36, 54)
+        else:
+            border = COLOR_CYAN_PRIMARY
+            text = COLOR_CYAN_PRIMARY
+            background = (12, 24, 38)
+        pygame.draw.rect(surface, background, rect)
+        pygame.draw.rect(surface, border, rect, 1)
+        text_surf = fonts["mono_small"].render(label, True, text)
+        surface.blit(text_surf, text_surf.get_rect(center=rect.center))
 
     def draw_camera_status_panel(
         self,
@@ -395,4 +548,4 @@ class HUDManager:
             ("ORIENTATION", "MIRRORED" if telemetry.mirrored else "DIRECT", COLOR_ICE_BLUE),
             ("FRAMES RECV", f"{telemetry.frame_count:,}", COLOR_TEXT_MUTED),
         ]
-        self.draw_metric_rows(surface, rect, rows, fonts, optional_from=4)
+        self.draw_metric_rows(surface, rect, rows, fonts)

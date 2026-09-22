@@ -13,6 +13,7 @@ import pygame
 
 from app.camera import CameraManager
 from app.config import AppConfig
+from app.controls import ControlState, MouseController
 from app.gestures import GestureEngine
 from app.hand_tracking import HandTracker, TrackingSnapshot
 from app.logger import setup_logger
@@ -98,12 +99,20 @@ class Application:
         )
         self._gesture_snapshot = self.gestures.disabled_snapshot()
 
+        # Touchless mouse control. The controller is created DISABLED: it never
+        # moves the cursor until the user explicitly enables it from the HUD.
+        self.mouse = MouseController(self.config.control_settings())
+        self._control_snapshot = self.mouse.snapshot
+        self.telemetry.update_control(self._control_snapshot)
+
         # UI Window Shell
         self.window = MainWindow(
             config=self.config,
             telemetry=self.telemetry,
             on_retry_camera=self._handle_camera_retry,
             on_exit=self.stop,
+            on_control_toggle=self._toggle_mouse_control,
+            on_control_disable=self._disable_mouse_control,
         )
 
         self._running = False
@@ -159,6 +168,24 @@ class Application:
                 ],
             )
             logger.warning("Camera retry failed: %s", msg)
+
+    def _toggle_mouse_control(self) -> None:
+        """UI action: enable, pause or resume the mouse control layer."""
+        previous = self.mouse.state
+        self.mouse.toggle()
+        if previous is ControlState.DISABLED and self.mouse.state is ControlState.DISABLED:
+            logger.warning("Mouse control could not be enabled: %s", self.mouse.message)
+        self.telemetry.update_control(self.mouse.snapshot)
+
+    def _disable_mouse_control(self) -> None:
+        """UI action: disarm control and release everything it holds."""
+        self.mouse.disable()
+        self.telemetry.update_control(self.mouse.snapshot)
+
+    def _sync_control(self, dt: float, tracking: TrackingSnapshot) -> None:
+        """Run one mouse control pass and publish its snapshot to the HUD."""
+        self._control_snapshot = self.mouse.update(dt, tracking, self._gesture_snapshot)
+        self.telemetry.update_control(self._control_snapshot)
 
     def _sync_gestures(self, tracking: TrackingSnapshot) -> None:
         """Run one recognition pass per frame and publish it to the HUD."""
@@ -280,6 +307,8 @@ class Application:
                         self.tracker.reset()
                         self.gestures.reset()
                         self.telemetry.set_gestures_unavailable()
+                        self.mouse.on_tracking_lost()
+                        self.telemetry.update_control(self.mouse.snapshot)
                         self.telemetry.set_camera_error(
                             title="CAMERA DISCONNECTED",
                             message="Camera video feed lost unexpectedly.",
@@ -289,7 +318,10 @@ class Application:
                 tracking = self.tracker.poll()
                 self._sync_tracking(tracking)
                 self._sync_gestures(tracking)
-                self.window.render_frame(current_frame, dt, tracking, self._gesture_snapshot)
+                self._sync_control(dt, tracking)
+                self.window.render_frame(
+                    current_frame, dt, tracking, self._gesture_snapshot, self._control_snapshot
+                )
 
                 # 5. Measure and Update Render FPS
                 fps_frame_count += 1
@@ -319,6 +351,14 @@ class Application:
         logger.info("Shutting down VisionCore...")
         self._running = False
         self.telemetry.app_state = AppState.SHUTTING_DOWN
+
+        # Disarm device control first: release any held mouse button, stop the
+        # pointer and clear the pending interaction state before anything else.
+        try:
+            self.mouse.close()
+        except Exception as exc:
+            logger.warning("Error shutting down mouse control: %s", exc)
+        self.telemetry.set_control_unavailable()
 
         # Release camera hardware
         try:
