@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import threading
 import time
 from typing import Optional
@@ -15,9 +14,8 @@ import pygame
 from app.camera import CameraManager
 from app.config import AppConfig
 from app.logger import setup_logger
-from app.state import AppState, SubsystemState, Telemetry
+from app.state import AppState, Telemetry
 from ui.window import MainWindow
-from utils.diagnostics import SystemDiagnostics
 from utils.platform import PlatformInfo
 
 logger = logging.getLogger("visioncore.app")
@@ -40,7 +38,7 @@ class Application:
             log_file="visioncore.log" if self.config.show_debug else None,
         )
 
-        logger.info("Initializing VisionCore (Phase 1 Foundation)...")
+        logger.info("Initializing VisionCore...")
 
         # Telemetry model
         self.telemetry = Telemetry(

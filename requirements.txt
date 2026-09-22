@@ -1,4 +1,4 @@
-# VisionCore Phase 1 Dependencies
+# VisionCore runtime dependencies
 # Minimal, lightweight production-grade dependencies for camera capture & desktop UI
 
 opencv-python-headless>=4.8.0

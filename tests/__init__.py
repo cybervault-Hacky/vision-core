@@ -1,1 +1,0 @@
-"""VisionCore automated test suite."""

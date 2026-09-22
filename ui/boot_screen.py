@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Tuple
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
-from app.state import Telemetry
 from ui.animations import ProgressAnimation, PulseAnimation, RotationAnimation
 from ui.hud import (
     COLOR_BG_DARK,

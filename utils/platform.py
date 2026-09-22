@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import platform
-import sys
 from dataclasses import dataclass
 from typing import Optional
 

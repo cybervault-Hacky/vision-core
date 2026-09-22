@@ -2,11 +2,11 @@
 
 **VisionCore** is a high-performance, local-first computer vision framework designed for touchless device control using standard webcam hardware and real-time computer vision.
 
-This repository houses **Phase 1: Foundation + Futuristic Camera HUD**, delivering a rock-solid desktop application architecture, hardware camera capture pipeline, non-blocking asynchronous streaming, and a sci-fi inspired AI vision heads-up display (HUD).
+It delivers a rock-solid desktop application architecture, a hardware camera capture pipeline, non-blocking asynchronous streaming, and a sci-fi inspired AI vision heads-up display (HUD).
 
 ---
 
-## Features (Phase 1)
+## Features
 
 * **Futuristic Boot Sequence**: Animated 2.4-second system initialization sequence probing core architecture, display subsystems, and camera hardware before entering active mode.
 * **Low-Latency Camera Pipeline**: Asynchronous background capture thread running independently of the UI thread, ensuring stutter-free rendering and zero frame drops.
@@ -14,7 +14,7 @@ This repository houses **Phase 1: Foundation + Futuristic Camera HUD**, deliveri
 * **Sci-Fi Camera HUD**:
   * Original visual identity: deep dark slate backdrop, cool cyan accents, ice-blue telemetry, and neutral typography.
   * Real-time hardware telemetry: resolution, camera FPS, render FPS, device index, and orientation.
-  * Live status matrix: Truthful subsystem reporting (`VISION CORE: ONLINE`, `CAMERA: ONLINE`, `TRACKING: STANDBY`, `GESTURES: STANDBY`, `DEVICE CTRL: DISABLED`).
+  * Live status matrix: truthful subsystem reporting (`VISION CORE: ONLINE`, `CAMERA: ONLINE`, `TRACKING: STANDBY`, `GESTURES: STANDBY`, `DEVICE CTRL: DISABLED`).
   * Subtle scanning animations: vertical sweeping scanline, rotating circular reticle, live indicator pulse, and sci-fi corner brackets.
 * **Resilient Error Recovery**:
   * Automatic detection of camera absence, permission rejections, and hardware locks.
@@ -134,7 +134,7 @@ When launching VisionCore for the first time, your operating system may prompt y
   ```bash
   python3 main.py --mock-camera
   ```
-  This loads the synthetic calibration test feed, allowing complete HUD, rendering, and lifecycle validation.
+  This loads the synthetic calibration stream, allowing the full HUD and rendering pipeline to run without physical camera hardware.
 
 ---
 
@@ -165,7 +165,7 @@ vision-core/
 │   ├── application.py       # Application coordinator & event loop
 │   ├── camera.py            # Hardware capture thread & frame manager
 │   ├── config.py            # AppConfig dataclass & JSON loader/validator
-│   ├── logger.py            # Clean, formatted sci-fi console logging
+│   ├── logger.py            # Clean, formatted console logging
 │   └── state.py             # Lifecycle state machine & telemetry models
 │
 ├── ui/
@@ -180,38 +180,20 @@ vision-core/
 │   ├── __init__.py          # Utility exports
 │   ├── platform.py          # Platform, OS, and permission diagnostics
 │   └── diagnostics.py       # System inspector & ASCII report generator
-│
-└── tests/
-    ├── __init__.py          # Test suite package
-    ├── test_animations.py   # Mathematical & tweening unit tests
-    ├── test_application.py  # Lifecycle & state transition integration tests
-    ├── test_camera.py       # Camera manager, mock feed & hardware failure tests
-    ├── test_config.py       # Configuration loading, clamping & save tests
-    └── test_diagnostics.py  # Platform detection & diagnostics tests
-```
-
----
-
-## Testing
-
-VisionCore includes a test suite covering configuration validation, camera mock streams, hardware failure handling, animation tweens, and application lifecycle transitions:
-
-```bash
-pytest -v
 ```
 
 ---
 
 ## Roadmap
 
-VisionCore is developed in modular phases. Future releases will introduce:
+Planned capabilities for upcoming releases:
 
-* **Phase 2**: Real-time hand landmark tracking and spatial coordinate normalization.
-* **Phase 3**: Dynamic gesture recognition (pinch, swipe, point, fist, open palm) and confidence scoring.
-* **Phase 4**: Touchless desktop control (mouse movement, clicking, scrolling, volume, and media gestures).
-* **Phase 5**: Gesture profile customization, sensitivity curves, and custom action mapping.
+* Real-time hand landmark tracking and spatial coordinate normalization.
+* Dynamic gesture recognition (pinch, swipe, point, fist, open palm) with confidence scoring.
+* Touchless desktop control (mouse movement, clicking, scrolling, volume, and media gestures).
+* Gesture profile customization, sensitivity curves, and custom action mapping.
 
-*(Note: Device control and gesture tracking are intentionally in STANDBY for Phase 1).*
+*(Note: Tracking, gesture recognition, and device control are intentionally in STANDBY and reported as such by the HUD).*
 
 ---
 

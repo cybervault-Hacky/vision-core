@@ -13,13 +13,10 @@ import pygame
 from app.state import Telemetry
 from ui.animations import PulseAnimation, RotationAnimation, ScanlineAnimation
 from ui.hud import (
-    COLOR_BG_DARK,
     COLOR_CYAN_PRIMARY,
     COLOR_ICE_BLUE,
     COLOR_ONLINE,
-    COLOR_PANEL_BG,
     COLOR_PANEL_BORDER,
-    COLOR_TEXT_MUTED,
     COLOR_TEXT_WHITE,
 )
 

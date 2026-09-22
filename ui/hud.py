@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 from typing import Dict, Tuple
 
@@ -118,7 +117,7 @@ class HUDManager:
         surface.blit(title_surf, (rect.left + 20, rect.top + 10))
 
         # Subtitle
-        sub_surf = fonts["caption"].render("AI VISION INTERFACE // PHASE 1", True, COLOR_CYAN_PRIMARY)
+        sub_surf = fonts["caption"].render("AI VISION INTERFACE // LOCAL CORE", True, COLOR_CYAN_PRIMARY)
         surface.blit(sub_surf, (rect.left + 20, rect.top + 34))
 
         # Right side: System Status Badge

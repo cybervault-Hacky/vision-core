@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VisionCore — Touchless Computer Control System (Phase 1)
+VisionCore — local-first computer vision system.
 Main entry point.
 """
 
@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     """Parse optional CLI flags while keeping standard execution argument-free."""
     parser = argparse.ArgumentParser(
         prog="visioncore",
-        description="VisionCore — Touchless Computer Control System (Phase 1)",
+        description="VisionCore — local-first computer vision system.",
     )
     parser.add_argument(
         "--diagnostics",
@@ -78,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mock-camera",
         action="store_true",
-        help="Use synthetic calibration camera stream (ideal for headless or testing).",
+        help="Use synthetic calibration stream instead of physical camera hardware.",
     )
     parser.add_argument(
         "--debug",

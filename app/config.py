@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -15,7 +15,7 @@ DEFAULT_CONFIG_FILENAME = "config.json"
 
 @dataclass
 class AppConfig:
-    """Application configuration for VisionCore Phase 1."""
+    """Application configuration for VisionCore."""
 
     # Camera settings
     camera_index: int = 0
@@ -32,18 +32,13 @@ class AppConfig:
     min_window_height: int = 600
     fullscreen: bool = False
 
-    # Futuristic UI & Boot settings
+    # Boot & UI settings
     boot_duration_sec: float = 2.4
-    scan_animation_speed: float = 1.0
     show_debug: bool = False
-    subtle_glow: bool = True
 
-    # Developer & diagnostic options
+    # Diagnostic options
     mock_camera: bool = False
     log_level: str = "INFO"
-
-    # Future extension slots (Phase 2+)
-    future_preferences: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         """Validate and clamp configuration parameters to safe operating ranges."""
@@ -77,9 +72,6 @@ class AppConfig:
         elif self.boot_duration_sec > 10.0:
             self.boot_duration_sec = 10.0
 
-        if self.scan_animation_speed <= 0.0:
-            self.scan_animation_speed = 1.0
-
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AppConfig:
         """Create AppConfig from dictionary with type-safe conversion."""
@@ -88,10 +80,6 @@ class AppConfig:
         cfg = cls(**filtered)
         cfg.validate()
         return cfg
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert configuration to dictionary."""
-        return asdict(self)
 
     @classmethod
     def load(cls, path: Optional[Path | str] = None) -> AppConfig:
@@ -129,16 +117,3 @@ class AppConfig:
                 exc,
             )
             return cls()
-
-    def save(self, path: Optional[Path | str] = None) -> bool:
-        """Serialize configuration to a JSON file."""
-        config_path = Path(path) if path else Path(DEFAULT_CONFIG_FILENAME)
-        try:
-            self.validate()
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(self.to_dict(), f, indent=4)
-            logger.info("Configuration saved to %s", config_path)
-            return True
-        except Exception as exc:
-            logger.error("Failed to save configuration to %s: %s", config_path, exc)
-            return False

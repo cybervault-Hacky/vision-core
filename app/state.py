@@ -36,7 +36,7 @@ class Telemetry:
 
     app_state: AppState = AppState.BOOTING
 
-    # Subsystem statuses (strictly truthful in Phase 1)
+    # Subsystem statuses (always reflect real capability)
     vision_core: SubsystemState = SubsystemState.ONLINE
     camera: SubsystemState = SubsystemState.CHECKING
     tracking: SubsystemState = SubsystemState.STANDBY

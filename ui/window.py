@@ -5,10 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import sys
-import time
 import warnings
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Optional
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
@@ -23,10 +21,8 @@ from ui.hud import (
     COLOR_CYAN_PRIMARY,
     COLOR_ERROR,
     COLOR_ICE_BLUE,
-    COLOR_ONLINE,
     COLOR_PANEL_BG,
     COLOR_PANEL_BORDER,
-    COLOR_STANDBY,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_WHITE,
     HUDManager,

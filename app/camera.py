@@ -13,13 +13,8 @@ import numpy as np
 logger = logging.getLogger("visioncore.camera")
 
 
-class CameraError(Exception):
-    """Exception raised when camera capture or hardware fails."""
-    pass
-
-
 class MockCameraSource:
-    """Synthetic test pattern generator for headless validation and mock tests."""
+    """Synthetic calibration pattern generator for headless environments."""
 
     def __init__(self, width: int = 640, height: int = 480, fps: int = 30):
         self.width = width
@@ -104,9 +99,6 @@ class MockCameraSource:
             return float(self.fps)
         return 0.0
 
-    def set(self, prop_id: int, value: float) -> bool:
-        return True
-
     def release(self) -> None:
         self.is_opened = False
 
@@ -133,8 +125,6 @@ class CameraManager:
 
         # Telemetry & metrics
         self._latest_frame: Optional[np.ndarray] = None
-        self._frame_timestamp: float = 0.0
-        self._frame_count: int = 0
         self._actual_fps: float = 0.0
         self._fps_window: list[float] = []
 
@@ -208,7 +198,6 @@ class CameraManager:
         try:
             if self.mock_mode:
                 self._capture = MockCameraSource()
-                self.backend = "SYNTHETIC_MOCK"
             else:
                 self._capture = cv2.VideoCapture(self.camera_index)
 
@@ -218,7 +207,9 @@ class CameraManager:
                 self.release()
                 return False, err_msg
 
-            if hasattr(self._capture, "getBackendName"):
+            if self.mock_mode:
+                self.backend = "SYNTHETIC"
+            elif hasattr(self._capture, "getBackendName"):
                 try:
                     self.backend = self._capture.getBackendName()
                 except Exception:
@@ -250,8 +241,6 @@ class CameraManager:
 
             with self._lock:
                 self._latest_frame = initial_rgb
-                self._frame_timestamp = time.time()
-                self._frame_count = 1
                 self._running = True
 
             # Start asynchronous background capture thread
@@ -321,8 +310,6 @@ class CameraManager:
 
             with self._lock:
                 self._latest_frame = rgb_frame
-                self._frame_timestamp = now
-                self._frame_count += 1
 
             # Yield briefly to maintain target FPS pacing without hogging CPU
             sleep_interval = max(0.001, (1.0 / self.target_fps) - (time.time() - now))

@@ -3,61 +3,12 @@
 from __future__ import annotations
 
 import math
-from typing import Callable, Tuple
 
 
-class Easing:
-    """Standard easing functions for natural sci-fi motion curves."""
-
-    @staticmethod
-    def linear(t: float) -> float:
-        return max(0.0, min(1.0, t))
-
-    @staticmethod
-    def ease_in_quad(t: float) -> float:
-        t = max(0.0, min(1.0, t))
-        return t * t
-
-    @staticmethod
-    def ease_out_quad(t: float) -> float:
-        t = max(0.0, min(1.0, t))
-        return t * (2.0 - t)
-
-    @staticmethod
-    def ease_in_out_quad(t: float) -> float:
-        t = max(0.0, min(1.0, t))
-        return 2.0 * t * t if t < 0.5 else -1.0 + (4.0 - 2.0 * t) * t
-
-    @staticmethod
-    def sine_wave(t: float, freq: float = 1.0) -> float:
-        """Returns normalized sine wave in range [0.0, 1.0]."""
-        return 0.5 + 0.5 * math.sin(t * 2.0 * math.pi * freq)
-
-
-class FadeAnimation:
-    """Smooth opacity transition helper."""
-
-    def __init__(self, initial_alpha: float = 0.0, duration: float = 0.5):
-        self.alpha = float(initial_alpha)
-        self.target_alpha = float(initial_alpha)
-        self.duration = max(0.001, duration)
-
-    def fade_to(self, target: float, duration: float | None = None) -> None:
-        self.target_alpha = max(0.0, min(1.0, target))
-        if duration is not None:
-            self.duration = max(0.001, duration)
-
-    def update(self, dt: float) -> float:
-        if math.isclose(self.alpha, self.target_alpha, abs_tol=1e-4):
-            self.alpha = self.target_alpha
-            return self.alpha
-
-        step = dt / self.duration
-        if self.alpha < self.target_alpha:
-            self.alpha = min(self.target_alpha, self.alpha + step)
-        else:
-            self.alpha = max(self.target_alpha, self.alpha - step)
-        return self.alpha
+def ease_in_out_quad(t: float) -> float:
+    """Quadratic ease-in/ease-out curve normalized to [0.0, 1.0]."""
+    t = max(0.0, min(1.0, t))
+    return 2.0 * t * t if t < 0.5 else -1.0 + (4.0 - 2.0 * t) * t
 
 
 class RotationAnimation:
@@ -107,18 +58,10 @@ class ScanlineAnimation:
 
 
 class ProgressAnimation:
-    """Controlled progress interpolator for boot sequence and initialization steps."""
+    """Controlled progress interpolator for the boot sequence and initialization steps."""
 
-    def __init__(self, duration: float = 2.0, easing_fn: Callable[[float], float] = Easing.ease_in_out_quad):
+    def __init__(self, duration: float = 2.0):
         self.duration = max(0.001, duration)
-        self.easing_fn = easing_fn
-        self.elapsed = 0.0
-        self.progress = 0.0
-        self.is_complete = False
-
-    def reset(self, new_duration: float | None = None) -> None:
-        if new_duration is not None:
-            self.duration = max(0.001, new_duration)
         self.elapsed = 0.0
         self.progress = 0.0
         self.is_complete = False
@@ -129,24 +72,10 @@ class ProgressAnimation:
 
         self.elapsed += dt
         norm = max(0.0, min(1.0, self.elapsed / self.duration))
-        self.progress = self.easing_fn(norm)
+        self.progress = ease_in_out_quad(norm)
 
         if norm >= 1.0:
             self.is_complete = True
             self.progress = 1.0
 
         return self.progress
-
-
-def lerp_color(
-    color_a: Tuple[int, int, int],
-    color_b: Tuple[int, int, int],
-    t: float,
-) -> Tuple[int, int, int]:
-    """Linearly interpolate between two RGB colors."""
-    t = max(0.0, min(1.0, t))
-    return (
-        int(color_a[0] + (color_b[0] - color_a[0]) * t),
-        int(color_a[1] + (color_b[1] - color_a[1]) * t),
-        int(color_a[2] + (color_b[2] - color_a[2]) * t),
-    )
