@@ -1,0 +1,6 @@
+# VisionCore Phase 1 Dependencies
+# Minimal, lightweight production-grade dependencies for camera capture & desktop UI
+
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+pygame>=2.5.0
