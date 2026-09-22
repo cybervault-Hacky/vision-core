@@ -2,6 +2,15 @@
 
 from app.camera import CameraManager
 from app.config import AppConfig
+from app.gestures import (
+    Gesture,
+    GestureEngine,
+    GesturePhase,
+    GestureResult,
+    GestureSettings,
+    GestureSnapshot,
+    GestureState,
+)
 from app.hand_tracking import (
     Hand,
     HandTracker,
@@ -16,6 +25,13 @@ __all__ = [
     "AppConfig",
     "AppState",
     "CameraManager",
+    "Gesture",
+    "GestureEngine",
+    "GesturePhase",
+    "GestureResult",
+    "GestureSettings",
+    "GestureSnapshot",
+    "GestureState",
     "Hand",
     "HandTracker",
     "HandTrackingResult",

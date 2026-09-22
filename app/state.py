@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
+from app.gestures.types import (
+    Gesture,
+    GesturePhase,
+    GestureSnapshot,
+    GestureState,
+)
 from app.hand_tracking import TrackingState
 
 
@@ -56,6 +62,14 @@ class Telemetry:
     camera_index: int = 0
     mirrored: bool = True
 
+    # Gesture recognition metrics (geometry derived, never simulated)
+    gesture: Gesture = Gesture.NONE
+    gesture_state: GestureState = GestureState.SEARCHING
+    gesture_phase: GesturePhase = GesturePhase.NONE
+    gesture_confidence: Optional[float] = None
+    gesture_latency_ms: float = 0.0
+    gesture_events: int = 0
+
     # Hand tracking metrics (all values are measured, never simulated)
     tracking_state: TrackingState = TrackingState.NO_HAND
     hands_detected: int = 0
@@ -102,6 +116,45 @@ class Telemetry:
         else:
             self.tracking = SubsystemState.SEARCHING
 
+    def update_gestures(self, snapshot: GestureSnapshot) -> None:
+        """Mirror a gesture recognition snapshot into the telemetry model."""
+        self.gesture_state = snapshot.state
+        self.gesture_latency_ms = snapshot.latency_ms
+        result = snapshot.result
+        self.gesture_phase = result.phase
+
+        if result.recognized:
+            self.gesture = result.gesture
+            self.gesture_confidence = result.confidence
+        elif result.phase is GesturePhase.RELEASE:
+            # Transition frame: keep reporting the gesture that just ended.
+            self.gesture = result.gesture
+            self.gesture_confidence = result.confidence or None
+        else:
+            self.gesture = Gesture.NONE
+            self.gesture_confidence = None
+
+        if result.changed:
+            self.gesture_events += 1
+
+        if snapshot.state is GestureState.DISABLED:
+            self.gestures = SubsystemState.DISABLED
+        elif snapshot.state is GestureState.RECOGNIZED:
+            self.gestures = SubsystemState.ACTIVE
+        elif snapshot.state is GestureState.SEARCHING:
+            self.gestures = SubsystemState.SEARCHING
+        else:
+            self.gestures = SubsystemState.ONLINE
+
+    def set_gestures_unavailable(self) -> None:
+        """Mark gesture recognition as not running (disabled or unavailable)."""
+        self.gesture = Gesture.NONE
+        self.gesture_confidence = None
+        self.gesture_phase = GesturePhase.NONE
+        self.gesture_state = GestureState.DISABLED
+        self.gesture_latency_ms = 0.0
+        self.gestures = SubsystemState.UNAVAILABLE
+
     def set_camera_error(
         self,
         title: str,
@@ -116,6 +169,11 @@ class Telemetry:
         self.hands_detected = 0
         self.hand_handedness = None
         self.hand_confidence = None
+        self.gesture = Gesture.NONE
+        self.gesture_confidence = None
+        self.gesture_phase = GesturePhase.NONE
+        self.gesture_state = GestureState.DISABLED
+        self.gestures = SubsystemState.UNAVAILABLE
         self.error_title = title
         self.error_message = message
         self.error_instructions = instructions or [

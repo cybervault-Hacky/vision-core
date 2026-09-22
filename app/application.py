@@ -13,6 +13,7 @@ import pygame
 
 from app.camera import CameraManager
 from app.config import AppConfig
+from app.gestures import GestureEngine
 from app.hand_tracking import HandTracker, TrackingSnapshot
 from app.logger import setup_logger
 from app.state import AppState, SubsystemState, Telemetry
@@ -84,6 +85,19 @@ class Application:
             self.telemetry.tracking = SubsystemState.INITIALIZING
             self.telemetry.tracking_engine = TRACKING_ENGINE_NAME
 
+        # Gesture recognition engine (pure geometry over the tracked landmarks,
+        # runs inline on the render thread and owns no external resources)
+        self.gestures = GestureEngine(self.config.gesture_settings())
+        self.telemetry.gestures = (
+            SubsystemState.SEARCHING if self.gestures.enabled else SubsystemState.DISABLED
+        )
+        self._frame_aspect = (
+            self.config.camera_width / self.config.camera_height
+            if self.config.camera_height > 0
+            else 4.0 / 3.0
+        )
+        self._gesture_snapshot = self.gestures.disabled_snapshot()
+
         # UI Window Shell
         self.window = MainWindow(
             config=self.config,
@@ -131,6 +145,7 @@ class Application:
             )
             if self.config.tracking_enabled and not self.tracker.is_running:
                 self.tracker.start()
+            self.gestures.reset()
             logger.info("Camera reconnected successfully!")
         else:
             hint = self.platform_info.camera_permission_hint()
@@ -144,6 +159,14 @@ class Application:
                 ],
             )
             logger.warning("Camera retry failed: %s", msg)
+
+    def _sync_gestures(self, tracking: TrackingSnapshot) -> None:
+        """Run one recognition pass per frame and publish it to the HUD."""
+        if not self.gestures.enabled:
+            return
+        snapshot = self.gestures.process(tracking.result, self._frame_aspect)
+        self.telemetry.update_gestures(snapshot)
+        self._gesture_snapshot = snapshot
 
     def _sync_tracking(self, snapshot: TrackingSnapshot) -> None:
         """Publish measured tracking telemetry to the HUD (no simulated values)."""
@@ -247,11 +270,16 @@ class Application:
                             self.telemetry.camera_height = self.camera.height
 
                         # Hand the frame to the tracking worker (zero copy, never blocking)
+                        frame_height = frame.shape[0]
+                        if frame_height > 0:
+                            self._frame_aspect = frame.shape[1] / frame_height
                         self.tracker.submit_frame(frame)
                     elif not self.camera.is_active:
                         # Camera disconnected while active
                         logger.warning("Camera connection lost during active streaming")
                         self.tracker.reset()
+                        self.gestures.reset()
+                        self.telemetry.set_gestures_unavailable()
                         self.telemetry.set_camera_error(
                             title="CAMERA DISCONNECTED",
                             message="Camera video feed lost unexpectedly.",
@@ -260,7 +288,8 @@ class Application:
                 # 4. Synchronise tracking telemetry and render frame + HUD
                 tracking = self.tracker.poll()
                 self._sync_tracking(tracking)
-                self.window.render_frame(current_frame, dt, tracking)
+                self._sync_gestures(tracking)
+                self.window.render_frame(current_frame, dt, tracking, self._gesture_snapshot)
 
                 # 5. Measure and Update Render FPS
                 fps_frame_count += 1
@@ -302,6 +331,13 @@ class Application:
             self.tracker.close()
         except Exception as exc:
             logger.warning("Error stopping hand tracking engine: %s", exc)
+
+        # Release gesture recognition state
+        try:
+            self.gestures.close()
+        except Exception as exc:
+            logger.warning("Error stopping gesture engine: %s", exc)
+        self.telemetry.set_gestures_unavailable()
 
         # Close window & pygame display
         try:

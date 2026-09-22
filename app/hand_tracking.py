@@ -19,7 +19,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterator, Optional, Tuple
+from typing import Dict, Iterator, Optional, Tuple
 
 # Keep the native MediaPipe / TFLite runtime quiet before it is imported.
 os.environ.setdefault("GLOG_minloglevel", "3")
@@ -47,6 +47,18 @@ LANDMARK_NAMES: Tuple[str, ...] = (
 )
 
 WRIST = LANDMARK_NAMES.index("WRIST")
+
+# Joint chain of every finger, ordered base to tip, as landmark indices:
+# (MCP, PIP, DIP, TIP) for the four fingers and (CMC, MCP, IP, TIP) for the
+# thumb. Shared by the visual layer and the gesture engine so landmark topology
+# has a single source of truth.
+FINGER_JOINTS: Dict[str, Tuple[int, int, int, int]] = {
+    "THUMB": (1, 2, 3, 4),
+    "INDEX": (5, 6, 7, 8),
+    "MIDDLE": (9, 10, 11, 12),
+    "RING": (13, 14, 15, 16),
+    "PINKY": (17, 18, 19, 20),
+}
 
 # Bone connections used for visualisation. Palm edges are drawn a little
 # stronger than finger phalanges by the HUD renderer.

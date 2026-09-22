@@ -12,9 +12,11 @@ import numpy as np
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
+from app.gestures import GestureSnapshot
 from app.hand_tracking import TrackingSnapshot
 from app.state import Telemetry
 from ui.animations import PulseAnimation, RotationAnimation
+from ui.gesture_overlay import GestureOverlay
 from ui.hand_overlay import HandOverlay
 from ui.hud import (
     COLOR_CYAN_PRIMARY,
@@ -33,15 +35,22 @@ class CameraView:
         self.reticle_rot = RotationAnimation(speed_deg_per_sec=22.0)
         self.pulse = PulseAnimation(min_val=0.4, max_val=1.0, frequency_hz=1.0)
         self.hand_overlay = HandOverlay()
+        self.gesture_overlay = GestureOverlay()
 
         # Cached surface for the scaled video frame
         self._last_frame_surf: Optional[pygame.Surface] = None
 
-    def update(self, dt: float, tracking: TrackingSnapshot) -> None:
+    def update(
+        self,
+        dt: float,
+        tracking: TrackingSnapshot,
+        gesture: GestureSnapshot,
+    ) -> None:
         """Advance animation states."""
         self.reticle_rot.update(dt)
         self.pulse.update(dt)
         self.hand_overlay.update(dt, tracking)
+        self.gesture_overlay.update(dt, gesture, tracking)
 
     # -- geometry ---------------------------------------------------------- #
 
@@ -194,6 +203,7 @@ class CameraView:
         telemetry: Telemetry,
         fonts: Dict[str, pygame.font.Font],
         tracking: TrackingSnapshot,
+        gesture: GestureSnapshot,
     ) -> None:
         """Render the complete camera viewport, video surface, and HUD layers."""
         pygame.draw.rect(surface, (5, 8, 12), viewport_rect)
@@ -213,6 +223,8 @@ class CameraView:
             # Hand tracking layer reacts to the actual tracking state
             self.hand_overlay.render(surface, fitted_rect, tracking, fonts)
 
+
+
             # Ambient reticle only while the pipeline has nothing locked
             if not tracking.state.is_engaged:
                 self.draw_targeting_reticle(
@@ -224,7 +236,18 @@ class CameraView:
         pygame.draw.rect(surface, (18, 36, 56), fitted_rect, 1)
         self.draw_corner_brackets(surface, fitted_rect, bracket_len=26, thickness=2)
 
-        self._draw_viewport_badges(surface, fitted_rect, telemetry, fonts, tracking)
+        badge_top = self._draw_viewport_badges(surface, fitted_rect, telemetry, fonts, tracking)
+
+        # Gesture layer consumes recognition results and existing landmarks, and
+        # sits above the badge stack so a centred hand is never covered.
+        self.gesture_overlay.render(
+            surface,
+            fitted_rect,
+            gesture,
+            tracking,
+            fonts,
+            (fitted_rect.right - 14, badge_top - 10),
+        )
 
     def _draw_viewport_badges(
         self,
@@ -233,8 +256,11 @@ class CameraView:
         telemetry: Telemetry,
         fonts: Dict[str, pygame.font.Font],
         tracking: TrackingSnapshot,
-    ) -> None:
-        """Live feed badge, tracking engine badge and resolution readout."""
+    ) -> int:
+        """Live feed badge, tracking engine badge and resolution readout.
+
+        Returns the top edge of the badge stack so overlays can stack above it.
+        """
         live_color = (
             int(COLOR_ONLINE[0] * self.pulse.value),
             int(COLOR_ONLINE[1] * self.pulse.value),
@@ -278,7 +304,7 @@ class CameraView:
             f"LANDMARK PIPELINE | {telemetry.tracker_fps:.1f} HZ | "
             f"{telemetry.tracking_latency_ms:.1f} MS"
         )
-        self._overlay_badge(
+        pipeline_rect = self._overlay_badge(
             surface,
             pipeline_str,
             fonts["mono_small"],
@@ -286,3 +312,4 @@ class CameraView:
             (fitted_rect.right - 14, resolution_rect.top - 6),
             align_right=True,
         )
+        return pipeline_rect.top

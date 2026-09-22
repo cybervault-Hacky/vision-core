@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
+from app.gestures import Gesture, GesturePhase, GestureState
 from app.state import SubsystemState, Telemetry
 from ui.animations import PulseAnimation
 
@@ -19,6 +20,10 @@ COLOR_CYAN_PRIMARY = (0, 229, 255)
 COLOR_ICE_BLUE = (140, 215, 255)
 COLOR_TEXT_WHITE = (235, 242, 250)
 COLOR_TEXT_MUTED = (120, 145, 170)
+
+# Minimum pixel spacing between metric rows; below this the layout drops
+# supplementary rows instead of overlapping them.
+MIN_ROW_STEP = 13
 
 COLOR_ONLINE = (0, 245, 160)      # Mint green
 COLOR_STANDBY = (255, 183, 3)     # Amber
@@ -112,11 +117,21 @@ class HUDManager:
         rect: pygame.Rect,
         rows: Sequence[Tuple[str, str, Tuple[int, int, int]]],
         fonts: Dict[str, pygame.font.Font],
+        optional_from: Optional[int] = None,
     ) -> None:
-        """Draw label/value rows with spacing that adapts to the panel height."""
+        """Draw label/value rows with spacing that adapts to the panel height.
+
+        When the panel cannot fit every row, the rows from ``optional_from``
+        onwards are dropped rather than squeezed into an unreadable stack. Rows
+        before that index are always rendered because they carry the primary
+        telemetry of the panel.
+        """
         top = rect.top + 46
-        available = max(1, (rect.bottom - 14) - top)
-        step = max(16, min(24, available // max(1, len(rows))))
+        available = max(1, (rect.bottom - 10) - top)
+        capacity = max(1, available // MIN_ROW_STEP)
+        if optional_from is not None and len(rows) > capacity >= optional_from:
+            rows = rows[:capacity]
+        step = max(MIN_ROW_STEP, min(24, available // max(1, len(rows))))
         y = top
 
         for label, value, color in rows:
@@ -229,8 +244,8 @@ class HUDManager:
             rows.append((name, status.value, get_status_color(status)))
 
         top = rect.top + 46
-        available = max(1, (rect.bottom - 14) - top)
-        step = max(18, min(26, available // max(1, len(rows))))
+        available = max(1, (rect.bottom - 10) - top)
+        step = max(MIN_ROW_STEP, min(24, available // max(1, len(rows))))
         y = top
 
         for name, status, color in rows:
@@ -285,7 +300,71 @@ class HUDManager:
         if telemetry.tracking_dropped_frames > 0:
             rows.append(("DROPPED", str(telemetry.tracking_dropped_frames), COLOR_STANDBY))
 
-        self.draw_metric_rows(surface, rect, rows, fonts)
+        self.draw_metric_rows(surface, rect, rows, fonts, optional_from=4)
+
+    def draw_gesture_panel(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+    ) -> None:
+        """Render recognised gesture state (measured evidence only)."""
+        self.draw_chamfer_panel(surface, rect)
+        self.draw_panel_header(surface, rect, "GESTURE ENGINE", fonts)
+
+        state = telemetry.gesture_state
+        releasing = telemetry.gesture_phase is GesturePhase.RELEASE
+        recognised = telemetry.gesture is not Gesture.NONE
+
+        if state is GestureState.DISABLED:
+            headline, accent = "DISABLED", COLOR_DISABLED
+        elif releasing and recognised:
+            headline, accent = telemetry.gesture.label, COLOR_STANDBY
+        elif recognised:
+            headline, accent = telemetry.gesture.label, COLOR_ONLINE
+        elif state is GestureState.SEARCHING:
+            headline, accent = "SEARCHING", COLOR_ICE_BLUE
+        else:
+            headline, accent = "ANALYZING", COLOR_ICE_BLUE
+
+        headline_surface = fonts["subheading"].render(headline, True, accent)
+        surface.blit(headline_surface, (rect.left + 16, rect.top + 44))
+
+        if recognised or releasing:
+            dot_x = rect.right - 22
+            pygame.draw.circle(
+                surface,
+                accent,
+                (dot_x, rect.top + 54),
+                4,
+            )
+            pygame.draw.circle(
+                surface,
+                tuple(int(channel * self._pulse.value) for channel in accent),
+                (dot_x, rect.top + 54),
+                int(5 + 3 * self._pulse.value),
+                1,
+            )
+
+        confidence = (
+            f"{telemetry.gesture_confidence * 100:.1f} %"
+            if telemetry.gesture_confidence is not None
+            else "--"
+        )
+        rows = [
+            ("CONFIDENCE", confidence, COLOR_ICE_BLUE),
+            ("STATE", "RELEASE" if releasing else state.display_label, accent),
+            (
+                "LATENCY",
+                f"{telemetry.gesture_latency_ms:.2f} MS" if telemetry.gesture_latency_ms > 0 else "--",
+                COLOR_TEXT_MUTED,
+            ),
+            ("EVENTS", str(telemetry.gesture_events), COLOR_TEXT_MUTED),
+        ]
+
+        body = pygame.Rect(rect.x, rect.y + 32, rect.width, rect.height - 32)
+        self.draw_metric_rows(surface, body, rows, fonts, optional_from=2)
 
     def draw_camera_status_panel(
         self,
@@ -316,4 +395,4 @@ class HUDManager:
             ("ORIENTATION", "MIRRORED" if telemetry.mirrored else "DIRECT", COLOR_ICE_BLUE),
             ("FRAMES RECV", f"{telemetry.frame_count:,}", COLOR_TEXT_MUTED),
         ]
-        self.draw_metric_rows(surface, rect, rows, fonts)
+        self.draw_metric_rows(surface, rect, rows, fonts, optional_from=4)

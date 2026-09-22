@@ -12,6 +12,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from app.config import AppConfig
+from app.gestures import GestureSnapshot
 from app.hand_tracking import TrackingSnapshot
 from app.state import AppState, Telemetry
 from ui.animations import PulseAnimation
@@ -328,7 +329,12 @@ class MainWindow:
         hint_rect = hint_surf.get_rect(center=(card_rect.centerx, card_y + card_h - 18))
         self.surface.blit(hint_surf, hint_rect)
 
-    def render_active_hud(self, frame: Optional[any], tracking: TrackingSnapshot) -> None:
+    def render_active_hud(
+        self,
+        frame: Optional[any],
+        tracking: TrackingSnapshot,
+        gesture: GestureSnapshot,
+    ) -> None:
         """Render header, camera viewport, telemetry sidebars, and footer."""
         self.surface.fill(COLOR_BG_DARK)
 
@@ -358,25 +364,31 @@ class MainWindow:
             self.telemetry,
             self.fonts,
             tracking,
+            gesture,
         )
 
-        # 4. Telemetry Panels in Sidebar
+        # 4. Telemetry Panels in Sidebar (four stacked modules)
         panel_gap = 12
-        stacked_height = max(180, content_height - panel_gap * 2)
-        matrix_height = int(stacked_height * 0.34)
-        tracking_height = int(stacked_height * 0.34)
-        camera_height = stacked_height - matrix_height - tracking_height
+        stacked_height = max(180, content_height - panel_gap * 3)
+        matrix_height = int(stacked_height * 0.24)
+        tracking_height = int(stacked_height * 0.28)
+        gesture_height = int(stacked_height * 0.24)
+        camera_height = stacked_height - matrix_height - tracking_height - gesture_height
 
         matrix_rect = pygame.Rect(sidebar_x, content_top, sidebar_width, matrix_height)
         tracking_rect = pygame.Rect(
             sidebar_x, matrix_rect.bottom + panel_gap, sidebar_width, tracking_height
         )
+        gesture_rect = pygame.Rect(
+            sidebar_x, tracking_rect.bottom + panel_gap, sidebar_width, gesture_height
+        )
         camera_rect = pygame.Rect(
-            sidebar_x, tracking_rect.bottom + panel_gap, sidebar_width, camera_height
+            sidebar_x, gesture_rect.bottom + panel_gap, sidebar_width, camera_height
         )
 
         self.hud_manager.draw_system_matrix_panel(self.surface, matrix_rect, self.telemetry, self.fonts)
         self.hud_manager.draw_tracking_panel(self.surface, tracking_rect, self.telemetry, self.fonts)
+        self.hud_manager.draw_gesture_panel(self.surface, gesture_rect, self.telemetry, self.fonts)
         self.hud_manager.draw_camera_status_panel(self.surface, camera_rect, self.telemetry, self.fonts)
 
     def render_frame(
@@ -384,11 +396,12 @@ class MainWindow:
         frame: Optional[any],
         dt: float,
         tracking: TrackingSnapshot,
+        gesture: GestureSnapshot,
     ) -> None:
         """Dispatch rendering based on current application state."""
         self.pulse.update(dt)
         self.hud_manager.update(dt)
-        self.camera_view.update(dt, tracking)
+        self.camera_view.update(dt, tracking, gesture)
 
         state = self.telemetry.app_state
 
@@ -396,7 +409,7 @@ class MainWindow:
             self.boot_screen.update(dt)
             self.boot_screen.render(self.surface, pygame.Rect(0, 0, self.width, self.height), self.fonts)
         elif state == AppState.CAMERA_ACTIVE:
-            self.render_active_hud(frame, tracking)
+            self.render_active_hud(frame, tracking, gesture)
         elif state == AppState.CAMERA_ERROR:
             self.render_error_screen()
 

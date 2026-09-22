@@ -51,6 +51,7 @@ class BootScreen:
             BootStep("03", "CAMERA DEVICE PROBE", 0.60),
             BootStep("04", "VISION ENGINE", 0.80),
             BootStep("05", "TRACKING PIPELINE", 0.95),
+            BootStep("06", "GESTURE ENGINE", 0.97),
         ]
 
         self.camera_check_passed: Optional[bool] = None

@@ -8,6 +8,7 @@ from ui.animations import (
 )
 from ui.boot_screen import BootScreen
 from ui.camera_view import CameraView
+from ui.gesture_overlay import GestureOverlay
 from ui.hand_overlay import HandOverlay
 from ui.hud import HUDManager
 from ui.window import MainWindow, UIButton
@@ -15,6 +16,7 @@ from ui.window import MainWindow, UIButton
 __all__ = [
     "BootScreen",
     "CameraView",
+    "GestureOverlay",
     "HUDManager",
     "HandOverlay",
     "MainWindow",

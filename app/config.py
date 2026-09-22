@@ -6,7 +6,10 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:  # imported lazily in gesture_settings() to keep imports shallow
+    from app.gestures.types import GestureSettings
 
 logger = logging.getLogger("visioncore.config")
 
@@ -39,6 +42,19 @@ class AppConfig:
     tracking_input_width: int = 640         # inference downscale target, 0 = native
     min_detection_confidence: float = 0.5
     min_tracking_confidence: float = 0.5
+
+    # Gesture recognition settings (geometry based, no additional model)
+    gesture_enabled: bool = True
+    gesture_confidence_threshold: float = 0.62   # minimum geometric evidence
+    gesture_stability_frames: int = 3            # consecutive agreeing frames
+    gesture_release_frames: int = 2              # consecutive frames to release
+    pinch_threshold: float = 0.72                # tip separation / palm scale
+    pinch_release_threshold: float = 0.85        # hysteresis while pinching
+    pinch_lift_threshold: float = 1.25           # pinch point distance from palm
+    swipe_distance_threshold: float = 0.18       # normalised travel
+    swipe_velocity_threshold: float = 0.60       # normalised units per second
+    swipe_cooldown: float = 0.70                 # seconds between swipes
+    swipe_window_sec: float = 0.40               # motion history window
 
     # Boot & UI settings
     boot_duration_sec: float = 2.4
@@ -106,6 +122,53 @@ class AppConfig:
                 clamped = max(0.05, min(0.95, value))
                 logger.warning("%s %.2f out of bounds [0.05, 0.95]; clamping to %.2f", name, value, clamped)
                 setattr(self, name, clamped)
+
+        if self.gesture_confidence_threshold < 0.30 or self.gesture_confidence_threshold > 0.95:
+            self.gesture_confidence_threshold = max(
+                0.30, min(0.95, self.gesture_confidence_threshold)
+            )
+            logger.warning(
+                "gesture_confidence_threshold out of bounds; clamping to %.2f",
+                self.gesture_confidence_threshold,
+            )
+
+        if self.pinch_threshold <= 0.0 or self.pinch_threshold > 1.40:
+            self.pinch_threshold = 0.72
+            logger.warning("pinch_threshold out of bounds; resetting to %.2f", self.pinch_threshold)
+
+        if self.pinch_release_threshold <= self.pinch_threshold:
+            self.pinch_release_threshold = self.pinch_threshold + 0.13
+
+        for name, low, high in (
+            ("swipe_distance_threshold", 0.05, 0.90),
+            ("swipe_velocity_threshold", 0.10, 6.0),
+            ("swipe_cooldown", 0.05, 3.0),
+            ("swipe_window_sec", 0.10, 1.50),
+        ):
+            value = getattr(self, name)
+            if not (low <= value <= high):
+                clamped = max(low, min(high, value))
+                logger.warning("%s %.2f out of bounds [%.2f, %.2f]; clamping to %.2f", name, value, low, high, clamped)
+                setattr(self, name, clamped)
+
+    def gesture_settings(self) -> "GestureSettings":
+        """Build the gesture engine settings from the application configuration."""
+        from app.gestures.types import GestureSettings
+
+        return GestureSettings(
+            enabled=self.gesture_enabled and self.tracking_enabled,
+            confidence_threshold=self.gesture_confidence_threshold,
+            stability_frames=self.gesture_stability_frames,
+            release_frames=self.gesture_release_frames,
+            pinch_threshold=self.pinch_threshold,
+            pinch_release_threshold=self.pinch_release_threshold,
+            pinch_lift_threshold=self.pinch_lift_threshold,
+            swipe_distance_threshold=self.swipe_distance_threshold,
+            swipe_velocity_threshold=self.swipe_velocity_threshold,
+            swipe_cooldown=self.swipe_cooldown,
+            swipe_window_sec=self.swipe_window_sec,
+            max_sessions=max(1, self.max_hands),
+        ).clamped()
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AppConfig:
