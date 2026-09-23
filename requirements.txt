@@ -17,5 +17,5 @@ pygame>=2.5.0
 # Windows, macOS and desktop Linux this is harmless. On a headless Linux host
 # without libGL, restore the headless build with:
 #
-#   pip install --force-reinstall --no-deps opencv-python-headless
+#   python3 -m pip install --force-reinstall --no-deps 'opencv-python-headless>=4.8.0,<4.12'
 mediapipe>=0.10.14,<0.10.22

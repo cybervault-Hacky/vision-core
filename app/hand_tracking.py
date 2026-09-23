@@ -5,8 +5,8 @@ the render loop never blocks on model execution. Everything happens on-device:
 frames are read from memory, processed locally, and discarded. No frame, image or
 landmark ever leaves the machine and no network transport is used.
 
-The emitted data model is intentionally gesture-agnostic: a future gesture engine
-can consume :class:`HandTrackingResult` without changes to this module.
+The emitted data model is intentionally gesture-agnostic: the gesture engine
+consumes :class:`HandTrackingResult` without coupling recognition to this module.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ logger = logging.getLogger("visioncore.tracking")
 
 # Ordered names of the 21 landmarks produced by the hand landmark model. They
 # give every finger (and the wrist) an addressable identity for the visual layer
-# and for the gesture engine planned for a later phase.
+# and for the gesture engine that consumes these landmarks.
 LANDMARK_NAMES: Tuple[str, ...] = (
     "WRIST",
     "THUMB_CMC", "THUMB_MCP", "THUMB_IP", "THUMB_TIP",
