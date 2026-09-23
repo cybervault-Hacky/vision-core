@@ -83,7 +83,7 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
   * **Same assistant, same gates**: a transcript becomes an ordinary user message (`YOU - VOICE "..."`), so a spoken request travels the identical allowlist -> safety gate -> existing controller chain as a typed one. There is no second router, no second confirmation system and no voice-specific way to reach the operating system.
   * **Privacy by construction**: the recogniser is a local, replaceable `SpeechRecognizer` (vosk or the `SpeechRecognition` package); audio is never written to disk, never sent anywhere, and the AI provider receives only the transcribed text plus the same constructed state block a typed message carries.
   * **Cancellable and stale-safe**: cancelling stops the capture at once, clears the pending text and closes the microphone; a late, malformed or superseded result is discarded by request id and can never execute. Silence ends in `LISTENING TIMEOUT` with `MIC OFF` and the microphone is re-activatable.
-  * **Never blocks a frame**: capture, transcription and the watchdog live on one background worker thread; the measured cost of the voice layer is ~0.002 ms per frame and the listening and idle loop rates are identical.
+  * **Never blocks a frame**: capture, transcription and the watchdog live on one background worker thread; the measured cost of the voice layer is ~0.002 ms per frame and the loop rate does not drop while listening (24.6 fps listening against 24.9 fps idle, measured at 1280x800 on the validation host).
 * **Resilient Error Recovery**:
   * Automatic detection of camera absence, permission rejections, and hardware locks.
   * Polished user-facing recovery screen with interactive `[ RETRY CAMERA ]` and `[ EXIT SYSTEM ]` controls.
@@ -235,8 +235,11 @@ python3 main.py --no-tracking
 # Launch with synthetic camera calibration stream (for headless or development)
 python3 main.py --mock-camera
 
-# Enable verbose debug logging
+# Enable verbose debug logging (console only; nothing is written to disk)
 python3 main.py --debug
+
+# Optionally mirror the log into a file of your choosing
+VISIONCORE_LOG_FILE=visioncore.log python3 main.py --debug
 ```
 
 ### Keyboard Controls

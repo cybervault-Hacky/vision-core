@@ -62,11 +62,13 @@ class Application:
         self.config = config or AppConfig.load()
         self.config.validate()
 
-        # Initialize logging
+        # Initialize logging. Debug output goes to the console: VisionCore never
+        # writes a file next to the user's own files unless they ask for one by
+        # setting VISIONCORE_LOG_FILE. This keeps --debug side-effect free.
         setup_logger(
             name="visioncore",
             level=self.config.log_level,
-            log_file="visioncore.log" if self.config.show_debug else None,
+            log_file=os.environ.get("VISIONCORE_LOG_FILE") or None,
         )
 
         logger.info("Initializing VisionCore...")
@@ -211,14 +213,24 @@ class Application:
         self._camera_probe_complete = False
         self._camera_probe_success = False
         self._camera_probe_message = ""
+        # Set at the start of shutdown. An in-flight camera open observes it and
+        # aborts as a lifecycle cancellation instead of reporting a hardware
+        # failure, so a shutdown can never look like a broken camera.
+        self._camera_cancel = threading.Event()
 
     def _probe_camera_async(self) -> None:
         """Asynchronously probe camera hardware and warm the tracking engine."""
         logger.info("Probing camera hardware at index %d...", self.config.camera_index)
-        success, msg = self.camera.start()
+        success, msg = self.camera.start(self._camera_cancel)
         self._camera_probe_success = success
         self._camera_probe_message = msg
         self._camera_probe_complete = True
+
+        if self._camera_cancel.is_set() or self._stopping:
+            # Shutdown raced the probe. Nothing may be published and nothing may
+            # be reported: the camera did not fail, it was cancelled.
+            logger.info("Camera probe cancelled by shutdown")
+            return
 
         # Inform boot screen of status
         self.window.boot_screen.notify_camera_result(success, msg)
@@ -258,6 +270,9 @@ class Application:
 
     def _dispatch(self, kind: IntentKind, label: str = "", payload: Optional[str] = None) -> bool:
         """Route one interface intent and log a refusal (never silently drop)."""
+        # The posture is refreshed from the live layers first, so a stop latched
+        # by the previous intent already outranks this one.
+        self._publish_safety_posture()
         outcome = self.intents.dispatch(
             Intent.create(
                 kind,
@@ -281,6 +296,9 @@ class Application:
         self.device.emergency_stop(intent.label or "EMERGENCY STOP")
         self.telemetry.update_control(self.mouse.snapshot)
         self.telemetry.update_device(self.device.snapshot)
+        # Publish the new posture at once: everything routed after this intent
+        # already has to be refused, without waiting for the next frame.
+        self._publish_safety_posture()
         return True
 
     def _intent_control_toggle(self, intent: Intent) -> bool:
@@ -523,7 +541,10 @@ class Application:
         """Re-probe camera hardware: the only recovery path for the camera."""
         logger.info("Attempting camera reconnection retry...")
         self.camera.release()
-        success, msg = self.camera.start()
+        success, msg = self.camera.start(self._camera_cancel)
+        if not success and self._camera_cancel.is_set():
+            logger.info("Camera reconnection cancelled by shutdown")
+            return False
         if success:
             self.telemetry.set_camera_online(
                 width=self.camera.width,
@@ -642,6 +663,15 @@ class Application:
         self.telemetry.control_latency_ms = (time.perf_counter() - started) * 1000.0
 
         # Keep the router's safety posture in step with the real layer states.
+        self._publish_safety_posture()
+
+    def _publish_safety_posture(self) -> None:
+        """Tell the router what the control layers are actually doing.
+
+        Called after every control update, and again before each interface
+        intent is routed: an emergency stop latched by the previous intent must
+        outrank the next one immediately, not one frame later.
+        """
         self.intents.set_safety(
             emergency=(
                 self.mouse.state is ControlState.EMERGENCY_STOP
@@ -885,6 +915,9 @@ class Application:
 
         logger.info("Shutting down VisionCore...")
         self._running = False
+        # Make the shutdown authoritative for the camera: a probe that is still
+        # opening the device aborts cleanly instead of publishing a live stream.
+        self._camera_cancel.set()
         self.telemetry.app_state = AppState.SHUTTING_DOWN
         self.director.set_lifecycle(InteractionLifecycle.SHUTTING_DOWN)
 

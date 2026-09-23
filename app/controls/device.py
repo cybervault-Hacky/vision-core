@@ -151,6 +151,12 @@ class DeviceController:
             self._cancel_continuous()
             self._open_palm_since = None
             self._mute_cycle_active = False
+            if self._state is ControlState.ACTIVE:
+                # Leaving DEVICE mode suspends the layer: it stays armed but can
+                # perform nothing, so neither the HUD nor telemetry may report it
+                # as ACTIVE while the application is in MOUSE mode. The emergency
+                # stop, a pause and a disabled layer are all left untouched.
+                self._state = ControlState.ARMED
         logger.info("Device control mode: %s", mode.label)
 
     def enable(self) -> bool:
@@ -168,6 +174,9 @@ class DeviceController:
         self._state = ControlState.ARMED
         self._message = ""
         self._refresh_levels(force=True)
+        # Publish immediately: the layer is armed for work now, and every reader
+        # (telemetry, the assistant's context, the HUD) must see that now.
+        self._publish(self._now())
         logger.info("Device control armed (backend=%s)", self.backend.name)
         return True
 
@@ -176,6 +185,7 @@ class DeviceController:
         self._cancel_continuous()
         self._state = ControlState.DISABLED
         self._message = self._startup_message()
+        self._publish(self._now())
         logger.info("Device control disabled")
 
     def pause(self) -> None:
@@ -184,6 +194,7 @@ class DeviceController:
             self._cancel_continuous()
             self._state = ControlState.PAUSED
             self._message = ""
+            self._publish(self._now())
             logger.info("Device control paused")
 
     def resume(self) -> None:
@@ -196,6 +207,7 @@ class DeviceController:
         self._gate.reset()
         self._state = ControlState.ARMED
         self._message = ""
+        self._publish(self._now())
         logger.info("Device control resumed")
 
     def toggle(self) -> bool:
@@ -231,6 +243,7 @@ class DeviceController:
             )
         )
         logger.warning("Device emergency stop: %s", reason)
+        self._publish(self._now())
 
     def on_tracking_lost(self) -> None:
         """Tracking pipeline stopped (camera loss): cancel, never keep a state."""
@@ -269,11 +282,70 @@ class DeviceController:
         )
 
     def perform(self, action: DeviceAction, runner=None, detail: str = "") -> DeviceActionResult:
-        """Run one action through the full gate chain (also used by buttons)."""
+        """Run one action through the full gate chain (also used by buttons).
+
+        The rate policy is applied here exactly as the gesture handlers apply it,
+        so a direct request - VisionCore AI or an interface button - can neither
+        repeat an action faster than its cooldown nor fire the same action a
+        gesture just performed. Continuous actions (volume, brightness) use their
+        own interval, event actions (media, mute, window) use the cooldown.
+        """
         now = self._now()
         capability = action.capability
+        if action.is_continuous:
+            interval, last = self._continuous_policy(action)
+            if not self._rate_ok(now, last, interval):
+                return self._rate_limited(action, now, capability, interval)
+        else:
+            last = self._last_action_at.get(action)
+            if last is not None and not self._rate_ok(
+                now, last, self.settings.action_cooldown_sec
+            ):
+                return self._rate_limited(
+                    action, now, capability, self.settings.action_cooldown_sec
+                )
+
         result = self._execute(action, now, runner, capability, detail)
+        if result.success:
+            if action.is_continuous:
+                self._note_continuous_action(action, now)
+            else:
+                self._last_action_at[action] = now
         self._record(result)
+        # Direct actions happen outside the frame loop, so republish at once:
+        # the interface must show this result, never the previous one.
+        self._publish(now)
+        return result
+
+    def _continuous_policy(self, action: DeviceAction) -> Tuple[float, float]:
+        """Rate interval and last-action time for a continuous action."""
+        if action in (DeviceAction.VOLUME_UP, DeviceAction.VOLUME_DOWN):
+            return self.settings.volume_interval_sec, self._last_volume_action_at
+        return self.settings.brightness_interval_sec, self._last_brightness_action_at
+
+    def _note_continuous_action(self, action: DeviceAction, now: float) -> None:
+        if action in (DeviceAction.VOLUME_UP, DeviceAction.VOLUME_DOWN):
+            self._last_volume_action_at = now
+        else:
+            self._last_brightness_action_at = now
+
+    def _rate_limited(
+        self,
+        action: DeviceAction,
+        now: float,
+        capability: Optional[DeviceCapability],
+        interval: float,
+    ) -> DeviceActionResult:
+        """Report a refused action truthfully instead of silently dropping it."""
+        result = DeviceActionResult(
+            False,
+            action,
+            "ACTION COOLDOWN",
+            now,
+            capability,
+            f"RATE LIMITED ({interval:.2f}s)",
+        )
+        self._record(result, silent=True)
         return result
 
     def run_action(self, action: DeviceAction, step: float = DIRECT_STEP) -> DeviceActionResult:
@@ -540,6 +612,14 @@ class DeviceController:
         if self._state not in (ControlState.ARMED, ControlState.ACTIVE):
             return DeviceActionResult(
                 False, action, "CONTROL NOT ENABLED", now, capability, "DEVICE DISABLED"
+            )
+        if self._mode is not ControlMode.DEVICE:
+            # Mode gate at the controller itself, not only at the caller: while
+            # the application is in MOUSE mode the device layer can never act,
+            # whoever asks - a gesture handler, VisionCore AI or an interface
+            # button. A mode change is the only way to arm it.
+            return DeviceActionResult(
+                False, action, "DEVICE MODE REQUIRED", now, capability, "MOUSE MODE ACTIVE"
             )
         if capability is not None and not self.backend.supports(capability):
             return DeviceActionResult(

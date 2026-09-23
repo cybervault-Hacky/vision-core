@@ -154,22 +154,35 @@ class AIClient:
         with self._lock:
             stale = job.generation != self._generation
         if stale:
-            self._results.put(
-                AIResult(request_id=request.request_id, cancelled=True, detail="CANCELLED")
-            )
+            self._publish(AIResult(request_id=request.request_id, cancelled=True,
+                                   detail="CANCELLED"))
             return
+
+        def publish(result: AIResult) -> None:
+            """Publish a result unless the request was cancelled while running.
+
+            A provider call can outlive the request that started it. The
+            generation is therefore re-read after the call returns, so an answer
+            (or an error) that arrives after ``cancel_all()`` - a mode change, an
+            emergency stop or a shutdown - is reported as cancelled instead of
+            being handed to the assistant as a fresh reply.
+            """
+            with self._lock:
+                if job.generation != self._generation:
+                    result = AIResult(
+                        request_id=request.request_id, cancelled=True, detail="CANCELLED"
+                    )
+            self._results.put(result)
 
         try:
             reply = self.provider.chat(request.messages, request.context)
         except ProviderError as exc:
             self.failed += 1
-            self._results.put(
-                AIResult(request_id=request.request_id, error=exc.kind, detail=exc.detail)
-            )
+            publish(AIResult(request_id=request.request_id, error=exc.kind, detail=exc.detail))
         except Exception as exc:  # never let a provider bug take the app down
             self.failed += 1
             logger.warning("AI provider raised %s", type(exc).__name__)
-            self._results.put(
+            publish(
                 AIResult(
                     request_id=request.request_id,
                     error=AIErrorKind.INTERNAL,
@@ -181,7 +194,7 @@ class AIClient:
             # Transport succeeded; the answer is read as data here, on the worker
             # thread, so the render loop only ever sees a typed result.
             parsed = parse_reply(reply.text)
-            self._results.put(
+            publish(
                 AIResult(
                     request_id=request.request_id,
                     reply=parsed.reply,
@@ -192,3 +205,7 @@ class AIClient:
         finally:
             with self._lock:
                 self._in_flight = False
+
+    def _publish(self, result: AIResult) -> None:
+        """Queue one result for the render loop (never blocks)."""
+        self._results.put(result)

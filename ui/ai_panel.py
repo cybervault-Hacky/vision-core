@@ -618,9 +618,23 @@ class AIPanel:
         measured = voice.level
         if listening and measured is not None:
             # The engine is measuring the microphone: show the measurement and
-            # the elapsed window, so "listening" is backed by real amplitude.
-            meter = pygame.Rect(detail_x, row.centery - 3, room, 6)
-            self._draw_level(surface, meter, measured, color)
+            # the elapsed window, so "listening" is backed by real amplitude and
+            # the bounded capture window stays visible while the meter is drawn.
+            window = fonts["mono_small"].render(
+                f"{voice.listening_seconds:.1f}s OF {voice.limit_seconds:.0f}s",
+                True, COLOR_TEXT_MUTED,
+            )
+            meter_room = room - window.get_width() - 10
+            if meter_room >= 30:
+                meter = pygame.Rect(detail_x, row.centery - 3, meter_room, 6)
+                self._draw_level(surface, meter, measured, color)
+                surface.blit(
+                    window,
+                    (meter.right + 10, row.centery - window.get_height() // 2),
+                )
+            else:
+                meter = pygame.Rect(detail_x, row.centery - 3, room, 6)
+                self._draw_level(surface, meter, measured, color)
         else:
             detail = _fit(self._voice_detail(voice), fonts["mono_small"], room)
             if detail:

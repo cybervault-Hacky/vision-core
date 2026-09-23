@@ -840,9 +840,19 @@ class MainWindow:
         return finished
 
     def close(self) -> None:
-        """Cleanly close the window and quit pygame display."""
+        """Cleanly close the window and release its pygame resources.
+
+        The font handles are dropped and the font module is uninitialised here so
+        that a complete start/stop cycle leaves no descriptor open behind it;
+        the application calls ``pygame.quit`` immediately afterwards.
+        """
         self.ai_panel.clear_input()
         logger.debug("Closing application window...")
+        try:
+            self.fonts = {}
+            pygame.font.quit()
+        except Exception as exc:
+            logger.warning("Error releasing fonts: %s", exc)
         try:
             pygame.display.quit()
         except Exception as exc:
