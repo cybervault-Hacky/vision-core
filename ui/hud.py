@@ -8,6 +8,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
+from app.ai.types import AIStatus
 from app.controls import ControlAction, ControlMode, ControlState
 from app.gestures import Gesture, GesturePhase, GestureState
 from app.state import SubsystemState, Telemetry
@@ -25,6 +26,9 @@ COLOR_TEXT_MUTED = (120, 145, 170)
 # Minimum pixel spacing between metric rows; below this the layout drops
 # supplementary rows instead of overlapping them.
 MIN_ROW_STEP = 12
+
+# Width of the footer assistant button, reserved so the legend never collides.
+AI_BUTTON_WIDTH = 150
 
 COLOR_ONLINE = (0, 245, 160)      # Mint green
 COLOR_STANDBY = (255, 183, 3)     # Amber
@@ -53,6 +57,23 @@ _LAUNCH_KEYS = {
     "calculator": "CALC",
     "files": "FILES",
 }
+
+# Real assistant status -> colour. Shared with the AI panel so the footer button
+# and the panel can never disagree about what the assistant is doing.
+_AI_STATUS_COLOR = {
+    AIStatus.READY: (0, 245, 160),
+    AIStatus.NOT_CONFIGURED: (95, 115, 130),
+    AIStatus.THINKING: (0, 229, 255),
+    AIStatus.RESPONDING: (140, 215, 255),
+    AIStatus.EXECUTING: (255, 183, 3),
+    AIStatus.ERROR: (255, 60, 90),
+}
+
+
+def ai_status_color(status: AIStatus) -> Tuple[int, int, int]:
+    """Colour for a real assistant status."""
+    return _AI_STATUS_COLOR.get(status, COLOR_TEXT_MUTED)
+
 
 # Short guidance shown while control is idle.
 _CONTROL_HINT = {
@@ -270,17 +291,55 @@ class HUDManager:
         surface.blit(left_surf, (rect.left + 16, rect.top + 7))
 
         # Hotkey legend: shortened, then dropped, as the window narrows so it can
-        # never run into the engine line on the left.
+        # never run into the engine line on the left or the AI button on the right.
         legend = (
-            "[C] CONTROL  |  [M] MOUSE  |  [D] DEVICE  |  [P] DIAGNOSTICS  |  "
+            "[A] AI  |  [C] CONTROL  |  [M] MOUSE  |  [D] DEVICE  |  [P] DIAGNOSTICS  |  "
             "[F11] FULLSCREEN  |  [ESC] SHUTDOWN"
         )
-        if rect.width < 900:
-            legend = "[C] CONTROL  |  [P] DIAGNOSTICS  |  [ESC] SHUTDOWN"
+        if rect.width < 1000:
+            legend = "[A] AI  |  [C] CONTROL  |  [P] DIAGNOSTICS  |  [ESC] SHUTDOWN"
         right_surf = fonts["mono_small"].render(legend, True, COLOR_CYAN_PRIMARY)
-        if rect.width >= 760 and right_surf.get_width() + left_surf.get_width() + 40 <= rect.width:
-            right_rect = right_surf.get_rect(right=rect.right - 16, centery=rect.top + 14)
+        legend_right = rect.right - AI_BUTTON_WIDTH - 28
+        if (
+            rect.width >= 780
+            and legend_right - right_surf.get_width() > left_surf.get_width() + rect.left + 24
+        ):
+            right_rect = right_surf.get_rect(right=legend_right, centery=rect.top + 14)
             surface.blit(right_surf, right_rect)
+
+    def draw_ai_button(
+        self,
+        surface: pygame.Surface,
+        footer_rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+        opened: bool = False,
+    ) -> pygame.Rect:
+        """The VISIONCORE AI button: deliberate activation, real status colour.
+
+        The dot shows the assistant's actual state, so an unconfigured assistant
+        looks unconfigured before the panel is even opened.
+        """
+        rect = pygame.Rect(
+            footer_rect.right - 16 - AI_BUTTON_WIDTH,
+            footer_rect.top + 4,
+            AI_BUTTON_WIDTH,
+            footer_rect.height - 8,
+        )
+        snapshot = telemetry.ai
+        color = ai_status_color(snapshot.status)
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        background = (14, 30, 46) if opened else ((12, 24, 38) if hovered else (10, 17, 26))
+        border = COLOR_CYAN_PRIMARY if (opened or hovered) else COLOR_PANEL_BORDER
+        pygame.draw.rect(surface, background, rect)
+        pygame.draw.rect(surface, border, rect, 1)
+
+        dot_color = tuple(int(channel * (0.55 + 0.45 * self._pulse.value)) for channel in color)
+        pygame.draw.circle(surface, dot_color, (rect.left + 12, rect.centery), 3)
+
+        label = fonts["mono_small"].render("VISIONCORE AI", True, COLOR_TEXT_WHITE)
+        surface.blit(label, (rect.left + 22, rect.centery - label.get_height() // 2))
+        return rect
 
     # -- panels ------------------------------------------------------------ #
 

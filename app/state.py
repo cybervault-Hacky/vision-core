@@ -20,6 +20,7 @@ from app.gestures.types import (
     GestureSnapshot,
     GestureState,
 )
+from app.ai.types import AISnapshot
 from app.hand_tracking import TrackingState
 from app.interaction.feedback import ActionFeedback
 from app.interaction.states import InteractionSnapshot
@@ -184,6 +185,11 @@ class Telemetry:
     feedback: Tuple[ActionFeedback, ...] = ()
     toast: Optional[ActionFeedback] = None
 
+    # AI assistant (Phase 7). A snapshot only: the assistant owns its own state,
+    # the conversation lives in memory and nothing here is ever persisted.
+    ai: AISnapshot = field(default_factory=AISnapshot)
+    ai_panel_visible: bool = False
+
     # Error handling context
     error_title: Optional[str] = None
     error_message: Optional[str] = None
@@ -313,6 +319,10 @@ class Telemetry:
         self.interaction = snapshot
         self.feedback = feedback
         self.toast = toast
+
+    def update_ai(self, snapshot: AISnapshot) -> None:
+        """Publish the assistant snapshot for this frame."""
+        self.ai = snapshot
 
     def set_device_unavailable(self) -> None:
         """Mark device control as not running (shutdown / camera loss)."""

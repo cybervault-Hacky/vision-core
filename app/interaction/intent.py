@@ -33,10 +33,16 @@ logger = logging.getLogger("visioncore.interaction.intent")
 
 
 class IntentSource(str, Enum):
-    """Where an intent came from."""
+    """Where an intent came from.
+
+    ``AI`` is the Phase 7 assistant. It is a normal source: it enters the same
+    priority system as a gesture or a button and it has no way to outrank a
+    safety tier, so an assistant request can never beat an emergency stop.
+    """
 
     GESTURE = "GESTURE"
     INTERFACE = "INTERFACE"
+    AI = "AI"
     VOICE = "VOICE"          # reserved: no voice input is implemented
 
     @property

@@ -53,6 +53,9 @@ _TRAVEL_ANCHORS = (0, FINGER_JOINTS["MIDDLE"][0])
 # Minimum gap between two identical "capability unavailable" notices.
 _NOTE_INTERVAL_SEC = 2.5
 
+# Volume/brightness change applied by one direct (non-gesture) request, in percent.
+DIRECT_STEP = 6.0
+
 
 class DeviceController:
     """Routes stable gestures to platform device actions, safely."""
@@ -271,6 +274,42 @@ class DeviceController:
         capability = action.capability
         result = self._execute(action, now, runner, capability, detail)
         self._record(result)
+        return result
+
+    def run_action(self, action: DeviceAction, step: float = DIRECT_STEP) -> DeviceActionResult:
+        """Run one allowlisted action once, through the same gates as a gesture.
+
+        This is the single direct entry point for a request that did not come
+        from a gesture - VisionCore AI uses it, and any future interface button
+        can too. The runner is the same call the gesture handlers make, so the
+        behaviour, the rate policy and the honesty of the result are identical:
+        the action is refused when control is not enabled, when the platform does
+        not offer the capability, and when the backend declines.
+        """
+        magnitude = max(1.0, min(25.0, float(step)))
+        runners = {
+            DeviceAction.VOLUME_UP: lambda: self._apply_volume(magnitude),
+            DeviceAction.VOLUME_DOWN: lambda: self._apply_volume(-magnitude),
+            DeviceAction.MUTE: self.backend.mute_toggle,
+            DeviceAction.PLAY_PAUSE: lambda: self.backend.media(MediaAction.PLAY_PAUSE),
+            DeviceAction.NEXT_TRACK: lambda: self.backend.media(MediaAction.NEXT),
+            DeviceAction.PREVIOUS_TRACK: lambda: self.backend.media(MediaAction.PREVIOUS),
+            DeviceAction.BRIGHTNESS_UP: lambda: self._apply_brightness(magnitude),
+            DeviceAction.BRIGHTNESS_DOWN: lambda: self._apply_brightness(-magnitude),
+            DeviceAction.MINIMIZE: lambda: self.backend.window(WindowAction.MINIMIZE),
+            DeviceAction.MAXIMIZE: lambda: self.backend.window(WindowAction.MAXIMIZE),
+            DeviceAction.NEXT_WINDOW: lambda: self.backend.window(WindowAction.NEXT),
+        }
+        runner = runners.get(action)
+        if runner is None:
+            return DeviceActionResult(
+                False, action, "ACTION NOT AVAILABLE", self._now(), action.capability
+            )
+        result = self.perform(action, runner=runner)
+        if result.success and action is DeviceAction.VOLUME_UP:
+            self._volume_steps += 1
+        elif result.success and action is DeviceAction.VOLUME_DOWN:
+            self._volume_steps -= 1
         return result
 
     # -- per frame --------------------------------------------------------- #

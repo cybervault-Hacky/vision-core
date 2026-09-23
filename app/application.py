@@ -11,6 +11,7 @@ from typing import Optional
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
+from app.ai import AIAssistant, ActionRouter, build_context, load_settings
 from app.camera import CameraManager
 from app.config import AppConfig
 from app.controls import (
@@ -26,6 +27,7 @@ from app.hand_tracking import HandTracker, TrackingSnapshot
 from app.interaction import (
     Intent,
     IntentKind,
+    IntentOutcome,
     IntentRouter,
     IntentSource,
     InteractionDirector,
@@ -151,6 +153,23 @@ class Application:
         )
         self._register_intents()
 
+        # VisionCore AI (Phase 7). The assistant is a coordinator that can only
+        # propose intents from a closed allowlist; it is configured from the
+        # environment, it contacts nothing until the user sends a message, and
+        # with no provider it still answers state questions locally.
+        self.ai_settings = load_settings()
+        self.ai = AIAssistant(
+            self.ai_settings,
+            router=ActionRouter(
+                dispatch=self._route_ai_intent,
+                telemetry=lambda: self.telemetry,
+            ),
+            context_provider=lambda: build_context(self.telemetry),
+            notify=self._notify_ai_result,
+        )
+        self._ai_snapshot = self.ai.snapshot()
+        self.telemetry.update_ai(self._ai_snapshot)
+
         # UI Window Shell
         self.window = MainWindow(
             config=self.config,
@@ -163,6 +182,10 @@ class Application:
             on_device_toggle=self._toggle_device_control,
             on_device_action=self._device_action,
             on_recovery=self._handle_recovery,
+            on_ai_send=self._ai_send,
+            on_ai_clear=self._ai_clear,
+            on_ai_confirm=self._ai_confirm,
+            on_ai_cancel=self._ai_cancel,
         )
 
         self._stopping = False
@@ -291,9 +314,16 @@ class Application:
                 DeviceAction.MAXIMIZE.value: WindowAction.MAXIMIZE,
                 DeviceAction.NEXT_WINDOW.value: WindowAction.NEXT,
             }.get(payload)
-            if window_action is None:
-                return False
-            result = self.device.perform_window_action(window_action)
+            if window_action is not None:
+                result = self.device.perform_window_action(window_action)
+            else:
+                # Any other device action (volume, media, brightness, window)
+                # runs through the same controller entry point a gesture would
+                # use, so the mode, enabled, safety and capability gates apply.
+                action = _device_action_for(payload)
+                if action is None:
+                    return False
+                result = self.device.run_action(action)
         if not result.success:
             logger.info("Device action refused: %s (%s)", result.message, result.detail)
         self.telemetry.update_device(self.device.snapshot)
@@ -357,6 +387,50 @@ class Application:
     def _handle_recovery(self, recovery: RecoveryAction) -> None:
         """Retry button pressed inside the viewport."""
         self._dispatch(IntentKind.RECOVERY, label=recovery.label, payload=recovery.value)
+
+    # -- assistant routes -------------------------------------------------- #
+
+    def _route_ai_intent(self, intent: Intent) -> IntentOutcome:
+        """Dispatch one AI intent through the same router and log a refusal.
+
+        The assistant never calls a controller: it produces an intent with
+        :class:`IntentSource.AI` and this route hands it to the one priority
+        ordered router that every other input source already uses.
+        """
+        outcome = self.intents.dispatch(intent)
+        if not outcome.accepted or not outcome.handled:
+            logger.info(
+                "AI intent %s not applied (%s)",
+                intent.kind.value,
+                outcome.reason or "no effect",
+            )
+        return outcome
+
+    def _notify_ai_result(self, label: str, success: bool, detail: str = "") -> None:
+        """Report an AI action through the Phase 6 notification system."""
+        self.director.notify(label, success=success, detail=detail)
+
+    def _ai_send(self, text: str) -> bool:
+        """Send one typed message from the panel (never blocks the loop)."""
+        return self.ai.send(text)
+
+    def _ai_clear(self) -> None:
+        """Clear the AI conversation (memory only)."""
+        self.ai.clear()
+
+    def _ai_confirm(self) -> None:
+        """User pressed [ CONFIRM ] on a disruptive action."""
+        self.ai.confirm()
+
+    def _ai_cancel(self) -> None:
+        """User pressed [ CANCEL ] on a disruptive action."""
+        self.ai.cancel()
+
+    def _update_ai(self, now: float) -> None:
+        """Advance the assistant once per frame and publish its snapshot."""
+        self.ai.update(now)
+        self._ai_snapshot = self.ai.snapshot()
+        self.telemetry.update_ai(self._ai_snapshot)
 
     # -- recovery ---------------------------------------------------------- #
 
@@ -583,6 +657,11 @@ class Application:
                     # application down: never render onto a closed display.
                     break
 
+                # 1b. Advance the AI assistant. This drains results from its
+                # background worker and never blocks: a slow provider costs the
+                # render loop nothing.
+                self._update_ai(time.perf_counter())
+
                 # 2. State Progression
                 if self.telemetry.app_state == AppState.BOOTING:
                     # Boot screen update returns True when boot animation finishes
@@ -722,6 +801,13 @@ class Application:
         self.telemetry.app_state = AppState.SHUTTING_DOWN
         self.director.set_lifecycle(InteractionLifecycle.SHUTTING_DOWN)
 
+        # 0. Stop the assistant first: it must not hold an open request while
+        # the application is shutting down. Any pending answer is discarded.
+        try:
+            self.ai.close()
+        except Exception as exc:
+            logger.warning("Error stopping the AI assistant: %s", exc)
+
         # 1. Release mouse control: any held button first, then the backend.
         control_released = False
         try:
@@ -837,3 +923,15 @@ class Application:
                 clock.tick(60)
         except Exception as exc:
             logger.warning("Shutdown sequence could not be displayed: %s", exc)
+
+
+def _device_action_for(payload: str) -> Optional[DeviceAction]:
+    """Map an intent payload onto an allowlisted device action (or None)."""
+    try:
+        action = DeviceAction(payload)
+    except ValueError:
+        return None
+    if action in (DeviceAction.LAUNCH_APP,):
+        # Launching an application is not part of the assistant's vocabulary.
+        return None
+    return action

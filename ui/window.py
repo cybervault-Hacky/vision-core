@@ -20,6 +20,7 @@ from app.state import AppState, Telemetry
 
 # A sidebar module never collapses below this, even in a very short window.
 MIN_PANEL_HEIGHT = 48
+from ui.ai_panel import AIPanel
 from ui.animations import PulseAnimation
 from ui.boot_screen import BootScreen
 from ui.camera_view import CameraView
@@ -109,6 +110,10 @@ class MainWindow:
         on_device_toggle: Optional[Callable[[], None]] = None,
         on_device_action: Optional[Callable[[DeviceAction, Optional[str]], None]] = None,
         on_recovery: Optional[Callable[[RecoveryAction], None]] = None,
+        on_ai_send: Optional[Callable[[str], bool]] = None,
+        on_ai_clear: Optional[Callable[[], None]] = None,
+        on_ai_confirm: Optional[Callable[[], None]] = None,
+        on_ai_cancel: Optional[Callable[[], None]] = None,
     ):
         self.config = config
         self.telemetry = telemetry
@@ -120,6 +125,10 @@ class MainWindow:
         self.on_device_toggle = on_device_toggle
         self.on_device_action = on_device_action
         self.on_recovery = on_recovery
+        self.on_ai_send = on_ai_send
+        self.on_ai_clear = on_ai_clear
+        self.on_ai_confirm = on_ai_confirm
+        self.on_ai_cancel = on_ai_cancel
 
         self.width = max(config.min_window_width, config.window_width)
         self.height = max(config.min_window_height, config.window_height)
@@ -148,6 +157,12 @@ class MainWindow:
         self.hud_manager = HUDManager()
         self.camera_view = CameraView(hud=self.hud_manager)
         self.pulse = PulseAnimation(min_val=0.4, max_val=1.0, frequency_hz=1.0)
+
+        # VisionCore AI panel: opened deliberately (HUD button or the A key),
+        # never by a gesture and never by itself.
+        self.ai_panel = AIPanel()
+        self.ai_panel_open = False
+        self.ai_button_rect: Optional[pygame.Rect] = None
 
         # Interactive error recovery buttons
         self.btn_retry: Optional[UIButton] = None
@@ -251,6 +266,21 @@ class MainWindow:
                 self._update_error_buttons()
                 logger.debug("Window resized to %dx%d", new_w, new_h)
 
+            elif event.type == pygame.KEYDOWN and self.ai_panel_open:
+                # While the assistant panel is focused every keystroke belongs to
+                # it, so a typed "d" can never switch control modes.
+                if event.key == pygame.K_ESCAPE:
+                    logger.info("Escape key pressed -> quitting")
+                    return False
+                if event.key == pygame.K_F11:
+                    pass
+                elif event.key == pygame.K_a and not self.ai_panel.input_text:
+                    self.toggle_ai_panel(False)
+                else:
+                    intent = self.ai_panel.handle_key(event)
+                    if intent is not None:
+                        self._handle_ai_intent(intent)
+
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     logger.info("Escape key pressed -> quitting")
@@ -276,14 +306,27 @@ class MainWindow:
                 elif event.key == pygame.K_p:
                     # Diagnostics can be hidden so the normal view stays clean.
                     self.telemetry.diagnostics_visible = not self.telemetry.diagnostics_visible
+                elif event.key == pygame.K_a:
+                    # Deliberate activation: the assistant only ever appears when
+                    # the user asks for it.
+                    self.toggle_ai_panel(True)
+
+            elif event.type == pygame.MOUSEWHEEL:
+                if self.ai_panel_open:
+                    self.ai_panel.handle_wheel(event.y)
 
             # Control buttons live in the sidebar telemetry panels.
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if self._handle_ai_click(event.pos):
+                    continue
                 if self._handle_recovery_click(event.pos):
                     continue
                 if self._handle_control_click(event.pos):
                     continue
                 if self._handle_device_click(event.pos):
+                    continue
+                if self.ai_button_rect and self.ai_button_rect.collidepoint(event.pos):
+                    self.toggle_ai_panel(True)
                     continue
 
             # Handle interactive buttons if in error state
@@ -293,6 +336,54 @@ class MainWindow:
                 if self.btn_exit and self.btn_exit.handle_event(event):
                     return False
 
+        return True
+
+    # -- assistant panel --------------------------------------------------- #
+
+    def toggle_ai_panel(self, open_: Optional[bool] = None) -> bool:
+        """Open or close the assistant panel (explicit user action only)."""
+        self.ai_panel_open = not self.ai_panel_open if open_ is None else bool(open_)
+        self.telemetry.ai_panel_visible = self.ai_panel_open
+        if not self.ai_panel_open:
+            self.ai_panel.clear_input()
+        logger.info("VisionCore AI panel %s", "opened" if self.ai_panel_open else "closed")
+        return self.ai_panel_open
+
+    def _handle_ai_click(self, position: Tuple[int, int]) -> bool:
+        """Route a click to the panel when it is open. True when consumed."""
+        if not self.ai_panel_open:
+            return False
+        intent = self.ai_panel.handle_click(position)
+        return self._handle_ai_intent(intent) if intent else False
+
+    def _handle_ai_intent(self, intent: str) -> bool:
+        """Run one panel intent. Returns True when the event is consumed."""
+        if intent == "close":
+            self.toggle_ai_panel(False)
+            return True
+        if intent == "clear":
+            self.ai_panel.clear_input()
+            if self.on_ai_clear:
+                self.on_ai_clear()
+            return True
+        if intent == "focus":
+            return self.ai_panel.contains(pygame.mouse.get_pos())
+        if intent == "send":
+            text = self.ai_panel.consume_input()
+            if not text:
+                return True
+            if self.on_ai_send and not self.on_ai_send(text):
+                # A request is already in flight: keep what the user typed
+                # instead of silently discarding it.
+                self.ai_panel.input_text = text[:600]
+            return True
+        if intent in ("confirm", "cancel"):
+            # Confirmation is performed by the application, never here: the panel
+            # only reports that the user pressed the button.
+            callback = self.on_ai_confirm if intent == "confirm" else self.on_ai_cancel
+            if callback:
+                callback()
+            return True
         return True
 
     def _handle_recovery_click(self, position: Tuple[int, int]) -> bool:
@@ -648,7 +739,57 @@ class MainWindow:
         elif state == AppState.CAMERA_ERROR:
             self.render_error_screen()
 
+        # The assistant is an overlay: it can be opened in any state and it never
+        # changes the layout the rest of the interface depends on.
+        self.render_ai_panel()
+
         pygame.display.flip()
+
+    def render_ai_panel(self) -> None:
+        """Draw the assistant panel over the workspace when it is open."""
+        self.ai_button_rect = self.hud_manager.draw_ai_button(
+            self.surface,
+            pygame.Rect(0, self.height - 28, self.width, 28),
+            self.telemetry,
+            self.fonts,
+            opened=self.ai_panel_open,
+        )
+        if not self.ai_panel_open:
+            return
+
+        viewport = self._workspace_rect()
+        content_height = max(100, self.height - 38 - 68)
+        rect = self.ai_panel.layout(viewport, content_height)
+        self.ai_panel.draw(
+            self.surface,
+            rect,
+            self.telemetry.ai,
+            self._ai_context_line(),
+            self.fonts,
+        )
+
+    def _workspace_rect(self) -> pygame.Rect:
+        """The camera workspace, computed exactly as the HUD layout does."""
+        content_top = 68
+        content_bottom = self.height - 38
+        content_height = max(100, content_bottom - content_top)
+        sidebar_width = max(232, min(280, int(self.width * 0.28)))
+        sidebar_x = self.width - sidebar_width - 16
+        viewport_width = max(200, sidebar_x - 32)
+        return pygame.Rect(16, content_top, viewport_width, content_height)
+
+    def _ai_context_line(self) -> str:
+        """One line of real state under the assistant status."""
+        telemetry = self.telemetry
+        mode = (
+            telemetry.control_mode.value
+            if hasattr(telemetry.control_mode, "value")
+            else str(telemetry.control_mode)
+        )
+        return (
+            f"{mode} MODE | {telemetry.tracking_state.status_label} | "
+            f"GESTURE {telemetry.gesture.value} | HANDS {telemetry.hands_detected}"
+        )
 
     def render_shutdown(self, dt: float) -> bool:
         """Render one frame of the shutdown sequence.
@@ -666,6 +807,7 @@ class MainWindow:
 
     def close(self) -> None:
         """Cleanly close the window and quit pygame display."""
+        self.ai_panel.clear_input()
         logger.debug("Closing application window...")
         try:
             pygame.display.quit()
