@@ -185,6 +185,11 @@ class TrackingSnapshot:
     inference_ms: float
     tracker_fps: float
     dropped_frames: int
+    # Measured lock-on progress in [0, 1]: consecutive frames the model has
+    # agreed on, over the frames required to declare a lock. It is a count, not
+    # a confidence estimate, so the interface can show acquisition without
+    # inventing another confidence system.
+    lock_progress: float = 0.0
 
     @property
     def detected(self) -> bool:
@@ -430,7 +435,16 @@ class HandTracker:
                 inference_ms=self._inference_ms,
                 tracker_fps=self._tracker_fps,
                 dropped_frames=self._dropped_frames,
+                lock_progress=self._lock_progress(),
             )
+
+    def _lock_progress(self) -> float:
+        """Measured acquisition progress for the current tracking state."""
+        if self._state is TrackingState.TRACKING:
+            return 1.0
+        if self._state is TrackingState.DETECTING:
+            return min(1.0, self._stable_frames / float(self.lock_frames))
+        return 0.0
 
     # -- worker ------------------------------------------------------------ #
 

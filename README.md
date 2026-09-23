@@ -42,7 +42,7 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
   * Original visual identity: deep dark slate backdrop, cool cyan accents, ice-blue telemetry, and neutral typography.
   * Real-time hardware telemetry: resolution, camera FPS, render FPS, device index, and orientation.
   * Live status matrix: truthful subsystem reporting (`VISION CORE: ONLINE`, `CAMERA: ONLINE`, `TRACKING: SEARCHING|ACTIVE|LOST`, `GESTURES: SEARCHING|ACTIVE|DISABLED`, `CONTROL: DISABLED`).
-  * Subtle scanning animations: vertical sweeping scanline, rotating circular reticle, live indicator pulse, and sci-fi corner brackets.
+  * Subtle scanning animations: central focus ring sweep, live indicator pulse, and sci-fi corner brackets.
 * **Gesture Recognition Pipeline**:
   * `CAMERA → HAND TRACKING → LANDMARKS → GESTURE ENGINE → RECOGNISED GESTURE → HUD`.
   * Landmark features only: finger extension is scored from wrist-to-tip reach and PIP joint angles, pinch from tip separation relative to palm scale. Nothing is matched against image templates or hard-coded screen regions.
@@ -57,10 +57,20 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
   * Tracking data model (`HandTrackingResult`: `detected`, `landmarks`, `confidence`, `handedness`, `bounding_box`, `timestamp`) ready for future gesture engines.
   * Multi-hand capable configuration (`max_hands` up to 4); one hand is tracked by default for the best latency.
   * Measured pipeline telemetry only: engine latency, pipeline rate and dropped frames.
+* **Interaction Experience** (Phase 6, all derived from real subsystem state):
+  * Typed interaction states resolved every frame: `INITIALIZING`, `SCANNING`, `HAND_DETECTED`, `TRACKING`, `READY`, `MOUSE_MODE`, `DEVICE_MODE`, `ACTION_EXECUTED`, `PAUSED`, `EMERGENCY_STOP`, `HAND_LOST`, `SHUTTING_DOWN`, with safety states resolved first.
+  * Central focus area: `SCANNING / NO HAND` -> `HAND DETECTED / ACQUIRING` -> `TRACKING / LOCKED` -> `GESTURE / PINCH` -> `ACTION / LEFT CLICK`, with animated transitions and a status ring (`SEARCHING`, `TRACKING`, `READY`, `ACTIVE`, `PAUSED`, `EMERGENCY`) whose acquisition arc is the tracker's measured lock progress.
+  * Reusable action feedback: a brief notification per real action result (`LEFT CLICK`, `DRAG START`, `SCROLL DOWN`, `VOLUME UP`, `NEXT TRACK`, `WINDOW SWITCH`, `APP LAUNCHED`, ...) which is reported as a refusal when the backend refuses, repeats coalesce into `xN` instead of spamming, and a safety state pins the notification until it clears.
+  * Recent action timeline: newest first, capped at 8 rows, kept in memory only and cleared on exit - no action history is written to disk.
+  * Tracking quality readout (`TRACKING LOCKED`, `TRACKING LOW CONFIDENCE`, `HAND LOST`) built from the tracker's own state and confidence, and a hand count that reports what the tracker actually sees.
+  * Mode aware telemetry: the mouse module reports real `POINTER`/`CLICK`/`SCROLL` readiness in `MOUSE` mode and reports itself suspended in `DEVICE` mode, while the device module reports the platform's real per-capability availability and the reason a capability is missing.
+  * Performance readout with measured values only: `FPS`, `TRACK ms`, `GESTURE ms`, `CONTROL ms`, shown as `--` until a value has actually been measured, and hideable with `P`.
+  * Safety-first shutdown sequence: control is released, device actions stopped, tracking stopped and the camera closed before `RELEASING CONTROL / STOPPING TRACKING / CAMERA OFF / SYSTEM IDLE` is displayed with the real result of each step.
+  * Voice-ready architecture only: one priority ordered intent router (`gesture | interface | future voice` -> control layer) with voice reserved and reported unavailable. No microphone, no speech model and no network call exists anywhere in the project.
 * **Resilient Error Recovery**:
   * Automatic detection of camera absence, permission rejections, and hardware locks.
   * Polished user-facing recovery screen with interactive `[ RETRY CAMERA ]` and `[ EXIT SYSTEM ]` controls.
-  * Keyboard accelerators (`C` to enable/pause mouse control, `R` to retry the camera, `F11` for fullscreen, `ESC` to quit).
+  * Keyboard accelerators (`C` to enable/pause mouse control, `M`/`D` for `MOUSE`/`DEVICE` mode, `P` to show/hide the performance readout, `R` to retry the camera, `F11` for fullscreen, `ESC` to quit).
 * **Mouse Control Pipeline**:
   * `CAMERA -> HAND TRACKING -> LANDMARKS -> GESTURE ENGINE -> MOUSE CONTROLLER -> OS CURSOR`.
   * The gesture engine never touches an operating system API: it produces results, and a separate control layer (`app/controls/`) decides whether acting on them is safe.
@@ -411,6 +421,7 @@ vision-core/
 │   ├── camera.py            # Hardware capture thread & frame manager
 │   ├── config.py            # AppConfig dataclass & JSON loader/validator
 │   ├── hand_tracking.py     # Hand tracking worker, landmark model & smoothing
+│   ├── interaction/         # Typed interaction states, action feedback & intent router
 │   ├── logger.py            # Clean, formatted console logging
 │   └── state.py             # Lifecycle state machine & telemetry models
 │
@@ -440,8 +451,11 @@ vision-core/
 │   ├── boot_screen.py       # 6-step futuristic system boot sequence
 │   ├── camera_view.py       # Letterboxed camera viewport & overlay HUD
 │   ├── gesture_overlay.py   # Gesture effects, motion trail & readout panel
+│   ├── feedback_view.py     # Action notifications, error strip & recent actions
+│   ├── focus_view.py        # Central focus ring, focus readout & quality chip
 │   ├── hand_overlay.py      # Hand landmark visualization & lock-on animation
 │   ├── hud.py               # Top header, subsystem matrix & telemetry panels
+│   ├── shutdown_screen.py   # Shutdown sequence (safety cleanup runs first)
 │   └── window.py            # Desktop window host, button engine & error screens
 │
 ├── utils/
@@ -460,6 +474,7 @@ Delivered:
 * ~~Gesture recognition: open palm, fist, point, pinch, two finger, swipe left/right~~ (Phase 3)
 * ~~Touchless mouse control: pointer, click, drag, scrolling, with a safety layer~~ (Phase 4)
 * ~~Touchless device control: volume, mute, media, brightness, window actions and an allowlisted launcher, in an explicit `MOUSE` / `DEVICE` mode~~ (Phase 5)
+* ~~Advanced interaction experience: typed interaction states, a central focus ring, reusable action feedback with a memory-only recent-action timeline, mode aware telemetry and a safety-first shutdown sequence~~ (Phase 6)
 
 Not implemented, and not claimed anywhere in the interface:
 

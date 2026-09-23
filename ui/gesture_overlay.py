@@ -16,6 +16,7 @@ from typing import Deque, Dict, List, Optional, Sequence, Tuple
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
+from app.controls.safety import ControlAction, ControlMode, ControlState
 from app.gestures import (
     Gesture,
     GesturePhase,
@@ -24,8 +25,10 @@ from app.gestures import (
     GestureState,
 )
 from app.hand_tracking import FINGER_JOINTS, WRIST, TrackingSnapshot
+from app.state import Telemetry
 from ui.animations import PulseAnimation
 from ui.hud import (
+    COLOR_ERROR,
     COLOR_ICE_BLUE,
     COLOR_ONLINE,
     COLOR_PANEL_BORDER,
@@ -126,19 +129,225 @@ class GestureOverlay:
         tracking: TrackingSnapshot,
         fonts: Dict[str, pygame.font.Font],
         readout_anchor: Tuple[int, int],
+        telemetry: Optional[Telemetry] = None,
     ) -> None:
         """Render the gesture layer inside the video viewport.
 
         ``readout_anchor`` is the bottom right corner the panel grows upwards
         from, which keeps it clear of the centred region where a hand is
-        normally tracked.
+        normally tracked. ``telemetry`` supplies the real control state used by
+        the interaction cues (pointer engagement, click pulse, scroll or device
+        direction); without it the layer still renders, minus those cues.
         """
         result = gesture.result
-        if result.recognized or result.phase is GesturePhase.RELEASE:
-            hand = tracking.primary
-            if hand is not None:
-                self._draw_effect(surface, fitted, hand.landmarks, result)
+        active = result.recognized or result.phase is GesturePhase.RELEASE
+        hand = tracking.primary if active else None
+
+        if hand is not None and telemetry is not None:
+            self._draw_interaction_cues(surface, fitted, hand, result, telemetry, fonts)
+        if hand is not None:
+            self._draw_effect(surface, fitted, hand.landmarks, result)
         self._draw_readout(surface, gesture, fonts, readout_anchor)
+
+    # -- interaction cues -------------------------------------------------- #
+
+    def _draw_interaction_cues(
+        self,
+        surface: pygame.Surface,
+        fitted: pygame.Rect,
+        hand,
+        result: GestureResult,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+    ) -> None:
+        """Tie the recognised gesture to what the control layers really do.
+
+        POINT      fingertip focus plus the measured cursor relation
+        PINCH      a pulse at the contact point when a click really happened
+        TWO_FINGER the direction of the scroll or device action that fired
+        OPEN_PALM  safety colouring while a stop is actually engaged
+        """
+        points = [
+            (fitted.x + landmark.x * fitted.width, fitted.y + landmark.y * fitted.height)
+            for landmark in hand.landmarks
+        ]
+        if len(points) < len(FINGER_JOINTS["PINKY"]):
+            return
+
+        canvas = self._canvas_for(points, fitted)
+        if canvas is None:
+            return
+        offset = canvas.topleft
+        local = [(p[0] - offset[0], p[1] - offset[1]) for p in points]
+        alpha, layer = self._layer("cues", canvas.size, 1.0)
+
+        gesture = result.gesture
+        if gesture is Gesture.POINT:
+            self._cue_point(layer, local, telemetry, alpha)
+        elif gesture is Gesture.PINCH:
+            self._cue_click_pulse(layer, local, telemetry, alpha)
+        elif gesture is Gesture.TWO_FINGER:
+            self._cue_direction(layer, local, telemetry, fonts, alpha)
+        elif gesture is Gesture.OPEN_PALM:
+            self._cue_safety(surface, local, offset, telemetry, alpha)
+
+        surface.blit(layer, canvas.topleft)
+        if gesture is Gesture.POINT:
+            self._cue_cursor_tag(surface, local, offset, telemetry, fonts)
+
+    def _cue_point(
+        self,
+        layer: pygame.Surface,
+        local: Sequence[Point],
+        telemetry: Telemetry,
+        alpha: int,
+    ) -> None:
+        """Fingertip focus: engaged colour only while the pointer is really live."""
+        tip = local[INDEX_CHAIN[-1]]
+        engaged = telemetry.pointer_active
+        accent = COLOR_ONLINE if engaged else COLOR_ICE_BLUE
+        radius = 10 if engaged else 13
+        pygame.draw.circle(layer, (*accent, alpha), tip, radius, 1)
+        pygame.draw.circle(layer, (*accent, alpha // 2), tip, radius + 4, 1)
+        pygame.draw.circle(layer, (*accent, alpha), tip, 2)
+
+    def _cue_cursor_tag(
+        self,
+        surface: pygame.Surface,
+        local: Sequence[Point],
+        offset: Tuple[int, int],
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+    ) -> None:
+        """Measured cursor relation, shown as text rather than invented geometry."""
+        if telemetry.pointer_x is None or telemetry.pointer_y is None:
+            return
+        text = f"CURSOR {telemetry.pointer_x:.2f} {telemetry.pointer_y:.2f}"
+        label = fonts["mono_small"].render(text, True, COLOR_ONLINE)
+        tip = local[INDEX_CHAIN[-1]]
+        position = (int(offset[0] + tip[0] + 16), int(offset[1] + tip[1] - 20))
+        width = label.get_width() + 12
+        height = label.get_height() + 6
+        panel = self._layer("cursor_tag", (width, height), 1.0)[1]
+        panel.fill((7, 14, 23, 205))
+        pygame.draw.rect(panel, (*COLOR_ONLINE, 190), panel.get_rect(), 1)
+        panel.blit(label, (6, 3))
+        surface.blit(panel, position)
+
+    def _cue_click_pulse(
+        self,
+        layer: pygame.Surface,
+        local: Sequence[Point],
+        telemetry: Telemetry,
+        alpha: int,
+    ) -> None:
+        """Expanding pulse at the pinch point right after a real click or drag."""
+        action = telemetry.control_action
+        age = telemetry.control_action_age
+        if action not in (ControlAction.LEFT_CLICK, ControlAction.DRAG_START):
+            return
+        if age > 0.45:
+            return
+        progress = min(1.0, max(0.0, age / 0.45))
+        thumb_tip = local[THUMB_CHAIN[-1]]
+        index_tip = local[INDEX_CHAIN[-1]]
+        centre = (
+            int((thumb_tip[0] + index_tip[0]) / 2),
+            int((thumb_tip[1] + index_tip[1]) / 2),
+        )
+        fade = int(alpha * (1.0 - progress))
+        if fade <= 4:
+            return
+        pygame.draw.circle(layer, (*COLOR_ONLINE, fade), centre, int(12 + 22 * progress), 1)
+        pygame.draw.circle(layer, (*COLOR_ONLINE, min(alpha, fade * 2)), centre, 3)
+
+    def _cue_direction(
+        self,
+        layer: pygame.Surface,
+        local: Sequence[Point],
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+        alpha: int,
+    ) -> None:
+        """Direction of the scroll or device action that actually fired."""
+        label = self._direction_label(telemetry)
+        if label is None:
+            return
+        text, up, color = label
+        index_tip = local[INDEX_CHAIN[-1]]
+        middle_tip = local[MIDDLE_CHAIN[-1]]
+        centre_x = int((index_tip[0] + middle_tip[0]) / 2)
+        centre_y = int((index_tip[1] + middle_tip[1]) / 2) + 26
+        direction = -1 if up else 1
+        for step, size in ((6, 6), (14, 9)):
+            cy = centre_y + direction * step
+            pygame.draw.lines(
+                layer,
+                (*color, alpha),
+                False,
+                [(centre_x - size, cy - direction * size), (centre_x, cy), (centre_x + size, cy - direction * size)],
+                1,
+            )
+        surface_text = fonts["mono_small"].render(text, True, color)
+        surface_text.set_alpha(alpha)
+        layer.blit(surface_text, surface_text.get_rect(center=(centre_x, centre_y + direction * 22)))
+
+    @staticmethod
+    def _direction_label(telemetry: Telemetry):
+        """``(text, up, colour)`` for a real scroll or device action, else None."""
+        if telemetry.control_mode is ControlMode.MOUSE:
+            action = telemetry.control_action
+            if telemetry.control_action_age > 0.6:
+                return None
+            if action is ControlAction.SCROLL_UP:
+                return ("SCROLL UP", True, COLOR_ONLINE)
+            if action is ControlAction.SCROLL_DOWN:
+                return ("SCROLL DOWN", False, COLOR_ONLINE)
+            return None
+
+        action = telemetry.device_action
+        if telemetry.device_action_age > 0.8 or action is None:
+            return None
+        name = getattr(action, "value", "")
+        if name == "VOLUME_UP":
+            return ("VOLUME UP", True, COLOR_ONLINE)
+        if name == "VOLUME_DOWN":
+            return ("VOLUME DOWN", False, COLOR_ONLINE)
+        if name == "BRIGHTNESS_UP":
+            return ("BRIGHTNESS UP", True, COLOR_ONLINE)
+        if name == "BRIGHTNESS_DOWN":
+            return ("BRIGHTNESS DOWN", False, COLOR_ONLINE)
+        return None
+
+    def _cue_safety(
+        self,
+        surface: pygame.Surface,
+        local: Sequence[Point],
+        offset: Tuple[int, int],
+        telemetry: Telemetry,
+        alpha: int,
+    ) -> None:
+        """Colour the palm pulses for a real safety state, never for decoration."""
+        emergency = (
+            telemetry.control_state is ControlState.EMERGENCY_STOP
+            or telemetry.device_state is ControlState.EMERGENCY_STOP
+        )
+        if not emergency:
+            return
+        centre = local[FINGER_JOINTS["MIDDLE"][0]]
+        radius = int(30 + 26 * self._pulse.value)
+        halo = self._layer("safety_halo", (radius * 2 + 8, radius * 2 + 8), 1.0)[1]
+        pygame.draw.circle(
+            halo,
+            (*COLOR_ERROR, int(alpha * 0.8)),
+            (radius + 4, radius + 4),
+            radius,
+            2,
+        )
+        surface.blit(
+            halo,
+            (int(centre[0] - radius - 4), int(centre[1] - radius - 4)),
+        )
 
     # -- effects ----------------------------------------------------------- #
 

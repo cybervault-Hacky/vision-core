@@ -95,6 +95,7 @@ class DeviceController:
         self._last_brightness_action_at = 0.0
         self._level_read_at = 0.0
         self._actions = 0
+        self._action_events = 0
         self._emergency_stops = 0
         self._notes: Dict[DeviceCapability, float] = {}
         self._frame_now: Optional[float] = None
@@ -617,6 +618,9 @@ class DeviceController:
         self._last_result = result
         if silent:
             return
+        # Every user visible result counts as an event - including a refusal, so
+        # the interface can report it honestly instead of showing a success.
+        self._action_events += 1
         if result.success:
             self._actions += 1
             if self._message.endswith("UNAVAILABLE"):
@@ -644,9 +648,12 @@ class DeviceController:
 
     def _build_snapshot(self, now: float, action_age: Optional[float] = None) -> DeviceSnapshot:
         result = self._last_result
+        reports = self.backend.capabilities()
         capabilities = tuple(
-            (report.capability.label, report.available)
-            for report in self.backend.capabilities()
+            (report.capability.label, report.available) for report in reports
+        )
+        capability_details = tuple(
+            (report.capability.label, report.detail) for report in reports
         )
         if action_age is None:
             action_age = now - result.timestamp if result is not None else 0.0
@@ -661,6 +668,7 @@ class DeviceController:
             suspended=self._suspended,
             suspended_reason=self._suspended_reason,
             capability_summary=capabilities,
+            capability_details=capability_details,
             volume=self._volume,
             volume_known=self._volume is not None,
             volume_steps=self._volume_steps,
@@ -669,8 +677,10 @@ class DeviceController:
             brightness_known=self._brightness is not None,
             action_label=result.message if result is not None else "",
             action_success=result.success if result is not None else True,
+            action_detail=result.detail if result is not None else "",
             action_age=action_age,
             actions_performed=self._actions,
+            action_events=self._action_events,
             emergency_stops=self._emergency_stops,
             launchable=self.backend.launchable(),
         )

@@ -188,6 +188,7 @@ class DeviceSnapshot:
     suspended: bool = False
     suspended_reason: str = ""
     capability_summary: Tuple[Tuple[str, bool], ...] = ()
+    capability_details: Tuple[Tuple[str, str], ...] = ()   # (label, reason) pairs
     volume: Optional[float] = None          # 0..1 when the platform reports it
     volume_known: bool = False
     volume_steps: int = 0                   # relative changes when level is unknown
@@ -196,11 +197,20 @@ class DeviceSnapshot:
     brightness_known: bool = False
     action_label: str = ""
     action_success: bool = True
+    action_detail: str = ""                 # platform reason or resolved app label
     action_age: float = 0.0
     actions_performed: int = 0
+    # Monotonic count of user visible results (successes and refusals), so the
+    # interface can report each one exactly once even when the label repeats.
+    action_events: int = 0
     emergency_stops: int = 0
     launchable: Tuple[Tuple[str, str], ...] = ()   # (key, label) pairs
 
     @property
     def capability_map(self) -> Mapping[str, bool]:
         return dict(self.capability_summary)
+
+    @property
+    def capability_notes(self) -> Mapping[str, str]:
+        """Why a capability is unavailable, as reported by the backend."""
+        return dict(self.capability_details)

@@ -186,10 +186,14 @@ class HUDManager:
         title_surf = fonts["title"].render("VISIONCORE", True, COLOR_TEXT_WHITE)
         surface.blit(title_surf, (rect.left + 20, rect.top + 10))
 
+        # No capability claim beyond what the project actually does: on-device
+        # landmark inference, no cloud service, no hosted model.
         sub_surf = fonts["caption"].render(
-            "AI VISION INTERFACE // LOCAL CORE", True, COLOR_CYAN_PRIMARY
+            "LOCAL VISION INTERFACE // ON-DEVICE INFERENCE", True, COLOR_CYAN_PRIMARY
         )
         surface.blit(sub_surf, (rect.left + 20, rect.top + 34))
+
+        self._draw_interaction_chip(surface, rect, telemetry, fonts)
 
         badge_x = rect.right - 250
         badge_y = rect.top + 12
@@ -204,6 +208,42 @@ class HUDManager:
             f"UPTIME {telemetry.formatted_uptime}", True, COLOR_TEXT_MUTED
         )
         surface.blit(uptime_text, (badge_x + 14, badge_y + 20))
+
+    def _draw_interaction_chip(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+    ) -> None:
+        """Header chip showing the resolved interaction state and control mode.
+
+        The state comes from the interaction director, which derives it purely
+        from real subsystem state; the mode shown is the active control mode.
+        """
+        interaction = telemetry.interaction
+        color = get_status_color(telemetry.control)
+        if interaction.state.is_safety:
+            color = COLOR_ERROR if interaction.state.value == "EMERGENCY_STOP" else COLOR_STANDBY
+
+        chip_x = rect.right - 470
+        if chip_x < rect.left + 360:
+            return
+
+        dot_alpha = 150 + int(105 * self._pulse.value)
+        pygame.draw.circle(
+            surface,
+            tuple(int(channel * (dot_alpha / 255.0)) for channel in color),
+            (chip_x, rect.top + 20),
+            4,
+        )
+        state_surf = fonts["mono"].render(interaction.state.label, True, color)
+        surface.blit(state_surf, (chip_x + 12, rect.top + 12))
+
+        mode_surf = fonts["mono_small"].render(
+            f"{interaction.mode_label} MODE", True, COLOR_TEXT_MUTED
+        )
+        surface.blit(mode_surf, (chip_x + 12, rect.top + 30))
 
     def draw_footer_diagnostics(
         self,
@@ -229,10 +269,18 @@ class HUDManager:
         left_surf = fonts["mono_small"].render(left_text, True, COLOR_TEXT_MUTED)
         surface.blit(left_surf, (rect.left + 16, rect.top + 7))
 
-        right_text = "[C] CONTROL  |  [F11] FULLSCREEN  |  [R] RECONNECT  |  [ESC] SHUTDOWN"
-        right_surf = fonts["mono_small"].render(right_text, True, COLOR_CYAN_PRIMARY)
-        right_rect = right_surf.get_rect(right=rect.right - 16, centery=rect.top + 14)
-        surface.blit(right_surf, right_rect)
+        # Hotkey legend: shortened, then dropped, as the window narrows so it can
+        # never run into the engine line on the left.
+        legend = (
+            "[C] CONTROL  |  [M] MOUSE  |  [D] DEVICE  |  [P] DIAGNOSTICS  |  "
+            "[F11] FULLSCREEN  |  [ESC] SHUTDOWN"
+        )
+        if rect.width < 900:
+            legend = "[C] CONTROL  |  [P] DIAGNOSTICS  |  [ESC] SHUTDOWN"
+        right_surf = fonts["mono_small"].render(legend, True, COLOR_CYAN_PRIMARY)
+        if rect.width >= 760 and right_surf.get_width() + left_surf.get_width() + 40 <= rect.width:
+            right_rect = right_surf.get_rect(right=rect.right - 16, centery=rect.top + 14)
+            surface.blit(right_surf, right_rect)
 
     # -- panels ------------------------------------------------------------ #
 
@@ -391,7 +439,12 @@ class HUDManager:
         telemetry: Telemetry,
         fonts: Dict[str, pygame.font.Font],
     ) -> Tuple[Optional[pygame.Rect], Optional[pygame.Rect]]:
-        """Render the mouse control module.
+        """Render the mouse control module for the active control mode.
+
+        The rows are contextual: in MOUSE mode they report the real readiness of
+        POINTER, CLICK and SCROLL, and in DEVICE mode they report that the mouse
+        layer is suspended, which is exactly what the controller is doing. A
+        capability the backend does not provide is never shown as ready.
 
         Returns the rectangles of the two interactive controls (primary toggle and
         disable) so the window can route clicks to them, or ``(None, None)`` when
@@ -416,8 +469,14 @@ class HUDManager:
             int(4 + 2 * self._pulse.value),
         )
 
+        device_mode = telemetry.control_mode is ControlMode.DEVICE
+
         # Live indicator: what the control layer is doing right now.
-        if telemetry.pointer_dragging:
+        if state is ControlState.EMERGENCY_STOP:
+            indicator, indicator_color = "SAFETY STOP", COLOR_ERROR
+        elif device_mode:
+            indicator, indicator_color = "SUSPENDED // DEVICE MODE", COLOR_DISABLED
+        elif telemetry.pointer_dragging:
             indicator, indicator_color = "DRAGGING", COLOR_ONLINE
         elif telemetry.pointer_scrolling:
             indicator, indicator_color = "SCROLLING", COLOR_ONLINE
@@ -435,30 +494,98 @@ class HUDManager:
         indicator_surf = fonts["mono_small"].render(indicator, True, indicator_color)
         surface.blit(indicator_surf, (rect.left + 16, rect.top + 66))
 
-        # Secondary line: the last real action, the safety reason or a backend hint.
-        if telemetry.control_message:
-            note, note_color = telemetry.control_message, COLOR_STANDBY
-        elif telemetry.control_action is not ControlAction.NONE:
-            note = telemetry.control_action.value
-            note_color = COLOR_ICE_BLUE
-        else:
-            note = _CONTROL_HINT.get(state, "")
-            note_color = COLOR_TEXT_MUTED
-        if note:
-            note_surf = fonts["mono_small"].render(note, True, note_color)
-            surface.blit(note_surf, (rect.left + 16, rect.top + 84))
+        # Contextual readiness rows, drawn only when the module is tall enough.
+        rows = self._readiness_rows(telemetry, state, device_mode)
+        y = rect.top + 86
+        for label, value, color in rows:
+            if y + 12 > rect.bottom - 36:
+                break
+            row_label = fonts["caption"].render(label, True, COLOR_TEXT_MUTED)
+            surface.blit(row_label, (rect.left + 16, y))
+            row_value = fonts["mono_small"].render(value, True, color)
+            surface.blit(row_value, row_value.get_rect(right=rect.right - 16, top=y))
+            y += 15
 
-        # Pointer coordinates (measured, hidden while the pointer is not engaged).
-        if (
-            rect.height >= 128
-            and telemetry.pointer_x is not None
-            and telemetry.pointer_y is not None
-        ):
-            pointer = f"X {telemetry.pointer_x:.2f}  Y {telemetry.pointer_y:.2f}"
-            pointer_surf = fonts["mono_small"].render(pointer, True, COLOR_TEXT_MUTED)
-            surface.blit(pointer_surf, (rect.left + 16, rect.top + 102))
+        # Secondary line: the last real action, the safety reason or a backend
+        # hint - dropped first when the module is short.
+        if rect.height >= 176:
+            if telemetry.control_message:
+                note, note_color = telemetry.control_message, COLOR_STANDBY
+            elif telemetry.control_action is not ControlAction.NONE:
+                note = telemetry.control_action.value
+                note_color = COLOR_ICE_BLUE
+            else:
+                note = _CONTROL_HINT.get(state, "")
+                note_color = COLOR_TEXT_MUTED
+            if note:
+                note_surf = fonts["mono_small"].render(note, True, note_color)
+                surface.blit(note_surf, (rect.left + 16, rect.bottom - 52))
 
         return self._draw_control_buttons(surface, rect, telemetry, fonts, state)
+
+    @staticmethod
+    def _readiness_rows(
+        telemetry: Telemetry,
+        state: ControlState,
+        device_mode: bool,
+    ) -> List[Tuple[str, str, Tuple[int, int, int]]]:
+        """Real readiness of POINTER, CLICK and SCROLL for the active mode.
+
+        Every value comes from the control layer's own report: an engaged
+        pointer, an unsupported button backend, a paused layer or a disarmed
+        layer each produce their own honest reading.
+        """
+        if state is ControlState.EMERGENCY_STOP:
+            return [
+                ("POINTER", "BLOCKED", COLOR_ERROR),
+                ("CLICK", "BLOCKED", COLOR_ERROR),
+                ("SCROLL", "BLOCKED", COLOR_ERROR),
+            ]
+        if device_mode:
+            return [
+                ("POINTER", "SUSPENDED", COLOR_DISABLED),
+                ("CLICK", "SUSPENDED", COLOR_DISABLED),
+                ("SCROLL", "SUSPENDED", COLOR_DISABLED),
+            ]
+
+        supported = "CLICKS UNAVAILABLE" not in telemetry.control_message
+        armed = state is ControlState.ARMED or state is ControlState.ACTIVE
+        paused = state is ControlState.PAUSED
+
+        if telemetry.pointer_active:
+            pointer = ("ACTIVE", COLOR_ONLINE)
+        elif paused:
+            pointer = ("PAUSED", COLOR_STANDBY)
+        elif not telemetry.control_available:
+            pointer = ("UNAVAILABLE", COLOR_DISABLED)
+        elif armed:
+            pointer = ("READY", COLOR_ICE_BLUE)
+        else:
+            pointer = ("OFF", COLOR_DISABLED)
+
+        if not supported or not telemetry.control_available:
+            click = ("UNAVAILABLE", COLOR_DISABLED)
+        elif telemetry.pointer_dragging:
+            click = ("DRAGGING", COLOR_ONLINE)
+        elif paused:
+            click = ("PAUSED", COLOR_STANDBY)
+        elif armed:
+            click = ("READY", COLOR_ICE_BLUE)
+        else:
+            click = ("OFF", COLOR_DISABLED)
+
+        if not supported or not telemetry.control_available:
+            scroll = ("UNAVAILABLE", COLOR_DISABLED)
+        elif telemetry.pointer_scrolling:
+            scroll = ("ACTIVE", COLOR_ONLINE)
+        elif paused:
+            scroll = ("PAUSED", COLOR_STANDBY)
+        elif armed:
+            scroll = ("READY", COLOR_ICE_BLUE)
+        else:
+            scroll = ("OFF", COLOR_DISABLED)
+
+        return [("POINTER", *pointer), ("CLICK", *click), ("SCROLL", *scroll)]
 
     def _draw_control_buttons(
         self,
@@ -557,10 +684,21 @@ class HUDManager:
         brightness, brightness_color = self._level_readout(
             telemetry.device_brightness, telemetry.device_brightness_known, capabilities.get("BRIGHTNESS")
         )
+        # The device layer is armed but deliberately inert outside DEVICE mode,
+        # and a capability the platform does not expose is never shown as ready.
+        if state is ControlState.DISABLED:
+            status_text, status_color = state.label, accent
+        elif not device_mode:
+            status_text, status_color = "SUSPENDED", COLOR_STANDBY
+        elif state is ControlState.EMERGENCY_STOP:
+            status_text, status_color = state.label, COLOR_ERROR
+        else:
+            status_text, status_color = state.label, accent
+
         fields = (
             ("MODE", telemetry.control_mode.label,
              COLOR_ICE_BLUE if device_mode else COLOR_TEXT_MUTED),
-            ("STATUS", state.label, accent),
+            ("STATUS", status_text, status_color),
             ("VOLUME", volume, volume_color),
             ("MEDIA", *self._capability_readout(capabilities.get("MEDIA"))),
             ("BRIGHTNESS", brightness, brightness_color),
@@ -568,12 +706,46 @@ class HUDManager:
         )
         grid_height = self._draw_field_grid(surface, rect, fields, fonts)
 
-        notice_top = rect.top + grid_height
+        # Persistent reason for a capability the host does not provide, so the
+        # module explains itself without the user having to trigger the action.
+        notice_top = self._draw_capability_note(
+            surface, rect, telemetry, fonts, rect.top + grid_height
+        )
         buttons = self._draw_device_buttons(surface, rect, telemetry, fonts, state, device_mode)
         topmost = buttons["launch"] or buttons["minimize"] or buttons["toggle"]
         notice_bottom = (topmost.top - 4) if topmost is not None else (rect.bottom - 8)
         self._draw_device_notice(surface, rect, telemetry, fonts, notice_top, notice_bottom)
         return buttons
+
+    def _draw_capability_note(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        telemetry: Telemetry,
+        fonts: Dict[str, pygame.font.Font],
+        top: int,
+    ) -> int:
+        """Report why an unavailable capability is unavailable, if the panel fits it.
+
+        The text comes from the platform's own capability report, so the
+        interface explains a missing feature instead of just greying it out.
+        """
+        if top + 14 > rect.bottom - 8:
+            return top
+        unavailable = [
+            (label, telemetry.device_capability_notes.get(label, ""))
+            for label, available in telemetry.device_capabilities.items()
+            if not available
+        ]
+        if not unavailable:
+            return top
+        label, reason = unavailable[0]
+        text = f"{label} NOT SUPPORTED"
+        if reason:
+            text += f" / {reason}"
+        note = fonts["mono_small"].render(text[:46], True, COLOR_DISABLED)
+        surface.blit(note, (rect.left + 16, top))
+        return top + 13
 
     def _volume_readout(
         self, telemetry: Telemetry, capabilities: Mapping[str, bool]

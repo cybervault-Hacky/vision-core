@@ -563,6 +563,7 @@ class MouseController:
     def _set_action(self, action: ControlAction) -> None:
         self._action = action
         self._action_at = self._now()
+        self._counters.action_events += 1
 
     def _snapshot_for(
         self,
@@ -605,6 +606,7 @@ class MouseController:
             clicks=self._counters.clicks,
             scroll_events=self._counters.scroll_events,
             emergency_stops=self._counters.emergency_stops,
+            action_events=self._counters.action_events,
         )
 
     def _publish(self, snapshot: ControlSnapshot) -> ControlSnapshot:
