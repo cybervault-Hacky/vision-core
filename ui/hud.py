@@ -12,6 +12,7 @@ from app.ai.types import AIStatus
 from app.controls import ControlAction, ControlMode, ControlState
 from app.gestures import Gesture, GesturePhase, GestureState
 from app.state import SubsystemState, Telemetry
+from app.voice.types import VoiceState
 from ui.animations import PulseAnimation
 
 # Visual Palette
@@ -73,6 +74,23 @@ _AI_STATUS_COLOR = {
 def ai_status_color(status: AIStatus) -> Tuple[int, int, int]:
     """Colour for a real assistant status."""
     return _AI_STATUS_COLOR.get(status, COLOR_TEXT_MUTED)
+
+
+# Real microphone state -> colour. OFF and UNAVAILABLE are deliberately quiet:
+# with the microphone closed the interface must not look like it is listening.
+_VOICE_STATE_COLOR = {
+    VoiceState.LISTENING: COLOR_STANDBY,
+    VoiceState.PROCESSING: COLOR_CYAN_PRIMARY,
+    VoiceState.READY: COLOR_ONLINE,
+    VoiceState.ERROR: COLOR_ERROR,
+    VoiceState.OFF: COLOR_DISABLED,
+    VoiceState.UNAVAILABLE: COLOR_DISABLED,
+}
+
+
+def voice_state_color(state: VoiceState) -> Tuple[int, int, int]:
+    """Colour for a real microphone state."""
+    return _VOICE_STATE_COLOR.get(state, COLOR_TEXT_MUTED)
 
 
 # Short guidance shown while control is idle.
@@ -292,12 +310,20 @@ class HUDManager:
 
         # Hotkey legend: shortened, then dropped, as the window narrows so it can
         # never run into the engine line on the left or the AI button on the right.
+        # The microphone key is listed in every tier: voice is an input method
+        # like typing, and the one key that turns it on must be discoverable
+        # without opening the panel.
         legend = (
-            "[A] AI  |  [C] CONTROL  |  [M] MOUSE  |  [D] DEVICE  |  [P] DIAGNOSTICS  |  "
-            "[F11] FULLSCREEN  |  [ESC] SHUTDOWN"
+            "[A] AI  |  [V] MIC  |  [C] CONTROL  |  [M] MOUSE  |  [D] DEVICE  |  "
+            "[P] DIAGNOSTICS  |  [F11] FULLSCREEN  |  [ESC] SHUTDOWN"
         )
+        if rect.width < 1200:
+            legend = (
+                "[A] AI  |  [V] MIC  |  [C] CONTROL  |  [P] DIAGNOSTICS  |  "
+                "[ESC] SHUTDOWN"
+            )
         if rect.width < 1000:
-            legend = "[A] AI  |  [C] CONTROL  |  [P] DIAGNOSTICS  |  [ESC] SHUTDOWN"
+            legend = "[A] AI  |  [V] MIC  |  [ESC] SHUTDOWN"
         right_surf = fonts["mono_small"].render(legend, True, COLOR_CYAN_PRIMARY)
         legend_right = rect.right - AI_BUTTON_WIDTH - 28
         if (
@@ -366,6 +392,12 @@ class HUDManager:
         for name, status in subsystems:
             rows.append((name, status.value, get_status_color(status)))
 
+        # Voice is a real subsystem state (OFF until the user activates it), so
+        # it sits in the same matrix rather than in a banner of its own.
+        rows.append(
+            ("VOICE", telemetry.voice.state.value, voice_state_color(telemetry.voice.state))
+        )
+
         top = rect.top + 46
         available = max(1, (rect.bottom - 10) - top)
         capacity = max(1, available // MIN_ROW_STEP)
@@ -381,7 +413,14 @@ class HUDManager:
             value_rect = value_surf.get_rect(right=rect.right - 16, centery=y + 8)
             surface.blit(value_surf, value_rect)
 
-            pygame.draw.circle(surface, color, (value_rect.left - 10, y + 8), 3)
+            dot_color = color
+            if name == "VOICE" and telemetry.voice.listening:
+                # A gentle pulse while the microphone is genuinely open: the
+                # animation tracks the state, it does not stand in for it.
+                dot_color = tuple(
+                    int(channel * (0.45 + 0.55 * self._pulse.value)) for channel in color
+                )
+            pygame.draw.circle(surface, dot_color, (value_rect.left - 10, y + 8), 3)
             y += step
 
     def draw_tracking_panel(

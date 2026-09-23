@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+from typing import Optional, Union
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
@@ -37,6 +37,9 @@ from app.interaction import (
 )
 from app.logger import setup_logger
 from app.state import AppState, SubsystemState, Telemetry
+from app.voice.controller import VoiceController
+from app.voice.settings import describe as describe_speech
+from app.voice.settings import load_speech_settings
 from ui.window import MainWindow
 from utils.platform import PlatformInfo
 
@@ -170,6 +173,19 @@ class Application:
         self._ai_snapshot = self.ai.snapshot()
         self.telemetry.update_ai(self._ai_snapshot)
 
+        # Voice input (Phase 8). Optional, local and inert: the microphone is
+        # closed until the user presses V or clicks the microphone control, and
+        # with no local engine the layer reports VOICE UNAVAILABLE honestly.
+        self.speech_settings = load_speech_settings()
+        self.voice = VoiceController(
+            self.speech_settings,
+            notify=self._notify_ai_result,
+        )
+        self._voice_snapshot = self.voice.snapshot()
+        self.telemetry.update_voice(self._voice_snapshot)
+        self._emergency_latched = False
+        logger.info("Voice input: %s", describe_speech(self.speech_settings))
+
         # UI Window Shell
         self.window = MainWindow(
             config=self.config,
@@ -186,6 +202,7 @@ class Application:
             on_ai_clear=self._ai_clear,
             on_ai_confirm=self._ai_confirm,
             on_ai_cancel=self._ai_cancel,
+            on_voice_toggle=self._voice_toggle,
         )
 
         self._stopping = False
@@ -303,8 +320,15 @@ class Application:
         logger.info("Control mode set to %s", mode.label)
         return True
 
-    def _intent_device_action(self, intent: Intent) -> bool:
-        """Run a window action or launch an allowlisted application."""
+    def _intent_device_action(self, intent: Intent) -> Union[bool, str]:
+        """Run a window action or launch an allowlisted application.
+
+        On failure the controller's own reason is returned as text, so the
+        interface and the assistant can report *why* an action was refused
+        ("DEVICE DISABLED", "BRIGHTNESS UNAVAILABLE") instead of a generic
+        refusal. Returning a reason does not change any decision: the controller
+        has already refused, and nothing is enabled by saying so.
+        """
         payload = intent.payload or ""
         if payload.startswith("LAUNCH:"):
             result = self.device.perform_launch(payload.split(":", 1)[1])
@@ -324,10 +348,11 @@ class Application:
                 if action is None:
                     return False
                 result = self.device.run_action(action)
-        if not result.success:
-            logger.info("Device action refused: %s (%s)", result.message, result.detail)
         self.telemetry.update_device(self.device.snapshot)
-        return result.success
+        if result.success:
+            return True
+        logger.info("Device action refused: %s (%s)", result.message, result.detail)
+        return result.detail or result.message or "REFUSED"
 
     def _intent_recovery(self, intent: Intent) -> bool:
         """Run a real recovery attempt for the failing subsystem."""
@@ -431,6 +456,66 @@ class Application:
         self.ai.update(now)
         self._ai_snapshot = self.ai.snapshot()
         self.telemetry.update_ai(self._ai_snapshot)
+
+    # -- voice routes ------------------------------------------------------ #
+
+    def _voice_toggle(self) -> bool:
+        """Start or cancel listening - only ever from a deliberate user action.
+
+        Nothing else in the application calls this: a gesture, the panel opening,
+        the camera starting and the application launching all leave the
+        microphone exactly as it was.
+
+        While an emergency stop is latched the microphone is not opened at all:
+        cancellation always works, activation is refused and reported, because a
+        safety state that says stop must not be followed by "and listen". Nothing
+        is enabled and nothing is reset here.
+        """
+        if self._emergency_active() and not self.voice.active:
+            self._notify_ai_result("VOICE BLOCKED", False, "EMERGENCY STOP ACTIVE")
+            logger.info("Microphone activation refused: emergency stop is active")
+            return False
+        started = self.voice.toggle()
+        logger.info("Voice input %s", "listening" if started else "closed")
+        self._voice_snapshot = self.voice.snapshot()
+        self.telemetry.update_voice(self._voice_snapshot)
+        return started
+
+    def _update_voice(self, now: float) -> None:
+        """Advance the voice layer and hand a finished transcript to the assistant."""
+        self.voice.update(now)
+        self._voice_snapshot = self.voice.snapshot()
+        self.telemetry.update_voice(self._voice_snapshot)
+
+        result = self.voice.take_transcript()
+        if result is not None and result.text:
+            # A transcript is a user message: it enters the same assistant, the
+            # same parser and the same safety gates as a typed one.
+            self.ai.send_transcript(result.text)
+
+    def _emergency_active(self) -> bool:
+        """True while either control layer is latched in an emergency stop."""
+        return (
+            self.mouse.state is ControlState.EMERGENCY_STOP
+            or self.device.state is ControlState.EMERGENCY_STOP
+        )
+
+    def _enforce_ai_safety(self) -> None:
+        """The emergency stop outranks the assistant and the microphone.
+
+        A proposal that has not run yet is withdrawn the moment the stop engages,
+        and an open microphone is closed: neither may stay armed while the safety
+        state says stop. Only the deliberate recovery path clears the stop - and
+        the assistant has no route that can reach it.
+        """
+        emergency = self._emergency_active()
+        if emergency and not self._emergency_latched:
+            self._emergency_latched = True
+            self.ai.emergency_cancel()
+            if self.voice.active:
+                self.voice.cancel("EMERGENCY STOP", label="VOICE INPUT STOPPED")
+        elif not emergency:
+            self._emergency_latched = False
 
     # -- recovery ---------------------------------------------------------- #
 
@@ -657,10 +742,11 @@ class Application:
                     # application down: never render onto a closed display.
                     break
 
-                # 1b. Advance the AI assistant. This drains results from its
-                # background worker and never blocks: a slow provider costs the
-                # render loop nothing.
+                # 1b. Advance the assistant and the voice layer. Both only drain
+                # results from their background workers and never block: a slow
+                # provider or a slow recogniser costs the render loop nothing.
                 self._update_ai(time.perf_counter())
+                self._update_voice(time.perf_counter())
 
                 # 2. State Progression
                 if self.telemetry.app_state == AppState.BOOTING:
@@ -754,6 +840,7 @@ class Application:
                 self._sync_tracking(tracking)
                 self._sync_gestures(tracking, frame_now)
                 self._sync_control(dt, tracking, frame_now)
+                self._enforce_ai_safety()
                 self.director.update(dt, self.telemetry, now=frame_now)
                 self.window.render_frame(
                     current_frame,
@@ -801,8 +888,19 @@ class Application:
         self.telemetry.app_state = AppState.SHUTTING_DOWN
         self.director.set_lifecycle(InteractionLifecycle.SHUTTING_DOWN)
 
-        # 0. Stop the assistant first: it must not hold an open request while
-        # the application is shutting down. Any pending answer is discarded.
+        # 0. Close the microphone and stop the assistant first: nothing may hold
+        #    an open capture or an in-flight request while the application is
+        #    shutting down. Any pending answer is discarded.
+        try:
+            self.voice.close()
+            logger.info(
+                "Voice input stopped (sessions %d, transcripts %d, cancellations %d)",
+                self.voice.sessions,
+                self.voice.transcripts,
+                self.voice.cancellations,
+            )
+        except Exception as exc:
+            logger.warning("Error stopping voice input: %s", exc)
         try:
             self.ai.close()
         except Exception as exc:

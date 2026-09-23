@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from typing import Callable, List, Optional, Tuple
 
 from app.ai.client import AIClient
@@ -46,6 +47,8 @@ from app.ai.types import (
     ChatRole,
     ResponseSource,
 )
+from app.interaction.multimodal import InputEnvelope, InputSource
+from app.ai.commands import match_command
 
 logger = logging.getLogger("visioncore.ai.assistant")
 
@@ -58,6 +61,38 @@ RESPOND_HOLD_SEC = 0.45
 EXECUTE_HOLD_SEC = 0.55
 # Watchdog: a provider that never answers is reported as a timeout.
 TIMEOUT_FACTOR = 1.6
+
+# Why a refusal happened, in the user's terms. A gate that says "no" is only
+# useful if the interface also says what would make it a "yes" - and none of
+# these ever enables anything by itself.
+_REFUSAL_HINTS = {
+    "DEVICE CONTROL NOT ENABLED": (
+        "Device control is currently disabled, so {label} was not performed. "
+        "Enable device control before asking me again."
+    ),
+    "DEVICE DISABLED": (
+        "Device control is currently disabled, so {label} was not performed. "
+        "Enable device control before asking me again."
+    ),
+    "MOUSE CONTROL NOT ENABLED": (
+        "Mouse control is currently disabled, so {label} was not performed. "
+        "Enable control before asking me again."
+    ),
+    "CONTROL NOT ENABLED": (
+        "Control is currently disabled, so {label} was not performed. Enable "
+        "control before asking me again."
+    ),
+    "EMERGENCY STOP ACTIVE": (
+        "An emergency stop is active, so {label} was not performed. Only the "
+        "deliberate recovery action clears it."
+    ),
+}
+
+# Used when a platform genuinely does not offer a capability.
+UNAVAILABLE_HINT = (
+    "The operating system does not expose that capability here, so {label} is "
+    "reported as unavailable instead of pretending to work."
+)
 
 
 class AIAssistant:
@@ -91,6 +126,7 @@ class AIAssistant:
         self._status = AIStatus.READY if settings.configured else AIStatus.NOT_CONFIGURED
         self._error: Optional[AIErrorKind] = None
         self._error_detail = ""
+        self._last_input: Optional[InputEnvelope] = None
         self.turns = 0
 
     # -- introspection ----------------------------------------------------- #
@@ -146,8 +182,13 @@ class AIAssistant:
 
     # -- conversation ------------------------------------------------------ #
 
-    def send(self, text: str) -> bool:
-        """Send one typed message. Never blocks and never calls the network directly."""
+    def send(self, text: str, source: InputSource = InputSource.TEXT) -> bool:
+        """Send one message. Never blocks and never calls the network directly.
+
+        ``source`` records how the message arrived (typed or spoken) so the
+        conversation can label it. Both travel the identical pipeline: the same
+        parser, the same allowlist and the same safety gates.
+        """
         message = (text or "").strip()
         # Only a request that is genuinely with a provider blocks another message;
         # the brief RESPONDING/EXECUTING status never swallows typed input.
@@ -158,10 +199,15 @@ class AIAssistant:
             return False
         message = message[:MAX_MESSAGE_CHARS]
         now = self._clock()
+        envelope = InputEnvelope.query(source, message, now)
 
+        self._last_input = envelope
         self._cancel_pending(note="SUPERSEDED")
-        self._append(ChatRole.USER, message, now, ResponseSource.SYSTEM)
+        self._append(
+            ChatRole.USER, message, now, ResponseSource.SYSTEM, input=envelope
+        )
         self.turns += 1
+        logger.info("Assistant input (%s)", envelope.summary())
 
         # Some requests are simply not available through VisionCore, and that
         # answer is fixed: it is decided here, not left to a model.
@@ -204,6 +250,25 @@ class AIAssistant:
         self._error_detail = ""
         self._set_status(AIStatus.THINKING, now)
         return True
+
+    def send_transcript(self, text: str) -> bool:
+        """Deliver a voice transcript, and never drop one silently.
+
+        A transcript is a user message like any other; the only difference is the
+        provenance tag it carries. If the assistant is still busy the message is
+        reported as not sent instead of disappearing.
+        """
+        if self.send(text, source=InputSource.VOICE):
+            return True
+        self._append(
+            ChatRole.SYSTEM,
+            "VOICE INPUT NOT SENT: the previous request is still in progress",
+            self._clock(),
+            ResponseSource.SYSTEM,
+            detail="DROPPED",
+        )
+        self._note("VOICE INPUT DROPPED", False, "ASSISTANT BUSY")
+        return False
 
     def update(self, now: Optional[float] = None) -> None:
         """Drain results and advance the status. Called once per frame."""
@@ -269,6 +334,28 @@ class AIAssistant:
         self._cancel_pending(note="CANCELLED")
         return True
 
+    def emergency_cancel(self) -> bool:
+        """Drop a waiting action the instant an emergency stop engages.
+
+        An emergency stop outranks everything the assistant can ask for, so a
+        proposal that has not run yet is withdrawn rather than left sitting on
+        screen waiting for a confirmation that must not be honoured.
+        """
+        plan = self._pending
+        if plan is None:
+            return False
+        self._pending = None
+        now = self._clock()
+        self._append(
+            ChatRole.SYSTEM,
+            f"ACTION CANCELLED: {plan.label} (emergency stop)",
+            now,
+            ResponseSource.SYSTEM,
+            detail="EMERGENCY",
+        )
+        self._note(f"{plan.label} CANCELLED", False, "EMERGENCY STOP")
+        return True
+
     # -- internals --------------------------------------------------------- #
 
     def _next_request_id(self) -> int:
@@ -281,7 +368,14 @@ class AIAssistant:
         return self._messages[-keep:]
 
     def _context(self) -> AIContext:
-        return self._context_provider()
+        """Fresh state snapshot: built when a message is sent, never per frame."""
+        context = self._context_provider()
+        envelope = self._last_input
+        if envelope is None or context.input_source == envelope.source.label:
+            return context
+        # A transcript can be imperfect; telling the provider where the words came
+        # from is honest data, not extra telemetry.
+        return replace(context, input_source=envelope.source.label)
 
     def _append(
         self,
@@ -290,9 +384,16 @@ class AIAssistant:
         now: float,
         source: ResponseSource,
         detail: str = "",
+        input: Optional[InputEnvelope] = None,
     ) -> ChatMessage:
+        """Add one conversation entry, keeping its input provenance."""
         message = ChatMessage(
-            role=role, content=content, timestamp=now, source=source, detail=detail
+            role=role,
+            content=content,
+            timestamp=now,
+            source=source,
+            detail=detail,
+            **({"input": input} if input is not None else {}),
         )
         self._messages.append(message)
         return message
@@ -316,7 +417,16 @@ class AIAssistant:
         self._set_status(status, now)
 
     def _answer_locally(self, message: str, now: float) -> None:
-        """Deterministic answer path: used when no provider can answer."""
+        """Deterministic path: used when no provider can answer.
+
+        A literal command from the closed vocabulary is executed through the same
+        gates an action from a model would use; a state question is answered from
+        telemetry; anything else gets the honest "no provider" note.
+        """
+        plan = match_command(message)
+        if plan is not None:
+            self._local_command(plan, now)
+            return
         context = self._context()
         result = local_answer(message, context)
         text = result.text if result is not None else off_topic_answer()
@@ -325,6 +435,20 @@ class AIAssistant:
             ChatRole.ASSISTANT, reply.text, now, reply.source, detail="LOCAL"
         )
         self._hold(AIStatus.RESPONDING, now)
+
+    def _local_command(self, plan: AIActionPlan, now: float) -> None:
+        """Run a locally recognised command - never claiming it came from a model."""
+        logger.info("Local command recognised: %s", plan.signature)
+        self._error = None
+        self._error_detail = ""
+        self._append(
+            ChatRole.ASSISTANT,
+            f"Understood: {plan.label}.",
+            now,
+            ResponseSource.LOCAL,
+            detail="LOCAL COMMAND",
+        )
+        self._apply_plan(plan, now)
 
     def _consume(self, result: AIResult, now: float) -> None:
         """Handle one background result."""
@@ -367,8 +491,16 @@ class AIAssistant:
 
         if reply.action is None:
             return
+        self._apply_plan(reply.action, now)
 
-        spec, reason = _normalise_plan(reply.action)
+    def _apply_plan(self, plan: AIActionPlan, now: float) -> bool:
+        """Allowlist, then confirmation, then execution.
+
+        Every plan - from a provider, from a local command phrase or from a
+        confirmation click - passes through here, so the two-step confirmation
+        rule cannot be bypassed by choosing a different input method.
+        """
+        spec, reason = _normalise_plan(plan)
         if spec is None:
             self._append(
                 ChatRole.SYSTEM,
@@ -377,8 +509,8 @@ class AIAssistant:
                 ResponseSource.SYSTEM,
                 detail="REFUSED",
             )
-            self._note(f"{reply.action.label} REFUSED", False, reason)
-            return
+            self._note(f"{plan.label} REFUSED", False, reason)
+            return False
 
         if spec.requires_confirmation:
             self._pending = spec
@@ -390,9 +522,10 @@ class AIAssistant:
                 ResponseSource.SYSTEM,
                 detail="CONFIRM",
             )
-            return
+            return True
 
         self._execute(spec, now)
+        return True
 
     def _execute(self, plan: AIActionPlan, now: float) -> None:
         """Hand one allowlisted plan to the action router and report the truth."""
@@ -415,6 +548,13 @@ class AIAssistant:
             ResponseSource.SYSTEM,
             detail="RESULT",
         )
+        hint = _refusal_hint(outcome)
+        if hint:
+            # The gate said no; say what would make it a yes. Nothing is enabled
+            # here - the user still has to do it deliberately.
+            self._append(
+                ChatRole.SYSTEM, hint, now, ResponseSource.SYSTEM, detail="REFUSED"
+            )
         if not outcome.accepted:
             # Nothing reached a controller, so no controller notification will
             # appear: report the refusal through the same feedback system.
@@ -458,6 +598,17 @@ class AIAssistant:
         self._append(ChatRole.SYSTEM, f"{kind.label}", now, ResponseSource.SYSTEM, detail=detail)
         logger.info("AI request failed: %s (%s)", kind.label, detail)
         if fallback:
+            # A literal command never needed a language model, so a provider that
+            # is down must not stop the words VisionCore already understands: the
+            # failure is reported above, and the command travels the ordinary
+            # allowlist and safety gates exactly as it would with a provider.
+            plan = match_command(self._last_user_text())
+            if plan is not None:
+                self._error = None
+                self._error_detail = ""
+                self._set_status(AIStatus.READY, now)
+                self._local_command(plan, now)
+                return
             context = self._context()
             result = local_answer(self._last_user_text(), context)
             if result is not None:
@@ -492,6 +643,23 @@ def _normalise_plan(plan: AIActionPlan) -> Tuple[Optional[AIActionPlan], str]:
         ),
         "",
     )
+
+
+def _refusal_hint(outcome: AIActionOutcome) -> str:
+    """Explain a refusal in the user's terms, or return an empty string.
+
+    The hint names the action that did *not* run, and it only ever explains why:
+    nothing is enabled and nothing is retried by explaining a refusal.
+    """
+    if outcome.success:
+        return ""
+    label = outcome.plan.label
+    hint = _REFUSAL_HINTS.get(outcome.reason or "")
+    if hint:
+        return hint.format(label=label)
+    if (outcome.reason or "").endswith("UNAVAILABLE ON THIS SYSTEM"):
+        return UNAVAILABLE_HINT.format(label=label)
+    return ""
 
 
 def _outcome_text(outcome: AIActionOutcome) -> str:

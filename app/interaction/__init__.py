@@ -2,13 +2,14 @@
 
 This package gives the interface a typed description of what the system is doing
 (interaction state, focus readout, status ring, tracking quality), a reusable
-action feedback channel with a memory-only recent-action timeline, and one
-priority ordered intent router shared by every input source - including the
-voice input that is reserved in the architecture but deliberately not
-implemented.
+action feedback channel with a memory-only recent-action timeline, one priority
+ordered intent router shared by every input source, and - since Phase 8 - the
+unified input model that names those sources (gesture, text, voice, interface,
+assistant) and describes what each request carries.
 
-Nothing here performs recognition, control or image processing, and nothing here
-contacts a network, an online model or a microphone.
+Nothing here performs recognition, control or image processing. Voice is
+described here, but the microphone itself lives in :mod:`app.voice`: this layer
+only records that a request came from speech rather than from typing.
 """
 
 from app.interaction.director import InteractionDirector
@@ -25,6 +26,11 @@ from app.interaction.intent import (
     IntentOutcome,
     IntentRouter,
     IntentSource,
+)
+from app.interaction.multimodal import (
+    InputEnvelope,
+    InputKind,
+    InputSource,
 )
 from app.interaction.states import (
     ActionTier,
@@ -47,6 +53,9 @@ __all__ = [
     "FeedbackSource",
     "FocusPhase",
     "FocusReadout",
+    "InputEnvelope",
+    "InputKind",
+    "InputSource",
     "Intent",
     "IntentKind",
     "IntentOutcome",

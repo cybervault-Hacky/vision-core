@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import logging
 import os
 import shutil
@@ -114,6 +116,7 @@ class MainWindow:
         on_ai_clear: Optional[Callable[[], None]] = None,
         on_ai_confirm: Optional[Callable[[], None]] = None,
         on_ai_cancel: Optional[Callable[[], None]] = None,
+        on_voice_toggle: Optional[Callable[[], None]] = None,
     ):
         self.config = config
         self.telemetry = telemetry
@@ -129,6 +132,7 @@ class MainWindow:
         self.on_ai_clear = on_ai_clear
         self.on_ai_confirm = on_ai_confirm
         self.on_ai_cancel = on_ai_cancel
+        self.on_voice_toggle = on_voice_toggle
 
         self.width = max(config.min_window_width, config.window_width)
         self.height = max(config.min_window_height, config.window_height)
@@ -163,6 +167,10 @@ class MainWindow:
         self.ai_panel = AIPanel()
         self.ai_panel_open = False
         self.ai_button_rect: Optional[pygame.Rect] = None
+
+        # Voice timing for the HUD: elapsed is measured against one time base
+        # (the session clock), never against the render loop's own rate.
+        self._session_started = time.perf_counter()
 
         # Interactive error recovery buttons
         self.btn_retry: Optional[UIButton] = None
@@ -276,6 +284,11 @@ class MainWindow:
                     pass
                 elif event.key == pygame.K_a and not self.ai_panel.input_text:
                     self.toggle_ai_panel(False)
+                elif event.key == pygame.K_v and not self.ai_panel.input_text:
+                    # Deliberate microphone activation, either way: V opens the
+                    # microphone, and V again cancels what is being listened to.
+                    # While a message is being typed "v" is just a letter.
+                    self._handle_voice_toggle()
                 else:
                     intent = self.ai_panel.handle_key(event)
                     if intent is not None:
@@ -310,6 +323,10 @@ class MainWindow:
                     # Deliberate activation: the assistant only ever appears when
                     # the user asks for it.
                     self.toggle_ai_panel(True)
+                elif event.key == pygame.K_v:
+                    # The microphone has its own key so it can be used without
+                    # opening the panel - and it never opens by itself.
+                    self._handle_voice_toggle()
 
             elif event.type == pygame.MOUSEWHEEL:
                 if self.ai_panel_open:
@@ -377,6 +394,9 @@ class MainWindow:
                 # instead of silently discarding it.
                 self.ai_panel.input_text = text[:600]
             return True
+        if intent == "microphone":
+            self._handle_voice_toggle()
+            return True
         if intent in ("confirm", "cancel"):
             # Confirmation is performed by the application, never here: the panel
             # only reports that the user pressed the button.
@@ -385,6 +405,11 @@ class MainWindow:
                 callback()
             return True
         return True
+
+    def _handle_voice_toggle(self) -> None:
+        """Ask the application to start or cancel listening (never optional here)."""
+        if self.on_voice_toggle:
+            self.on_voice_toggle()
 
     def _handle_recovery_click(self, position: Tuple[int, int]) -> bool:
         """Route a click on the viewport RETRY button. True when consumed."""
@@ -654,7 +679,9 @@ class MainWindow:
         # modules below give up height proportionally and drop supplementary
         # rows rather than overlapping each other.
         specs = [
-            ("matrix", 118, 118, 0.18),
+            # The matrix carries one row per subsystem, and since Phase 8 that
+            # includes the microphone state, so it needs a sixth row.
+            ("matrix", 140, 140, 0.18),
             ("tracking", 112, 104, 0.22),
             ("gesture", 84, 76, 0.15),
             ("control", 140, 130, 0.13),
@@ -766,6 +793,7 @@ class MainWindow:
             self.telemetry.ai,
             self._ai_context_line(),
             self.fonts,
+            voice=self.telemetry.voice,
         )
 
     def _workspace_rect(self) -> pygame.Rect:
@@ -786,10 +814,16 @@ class MainWindow:
             if hasattr(telemetry.control_mode, "value")
             else str(telemetry.control_mode)
         )
-        return (
+        line = (
             f"{mode} MODE | {telemetry.tracking_state.status_label} | "
             f"GESTURE {telemetry.gesture.value} | HANDS {telemetry.hands_detected}"
         )
+        # The microphone gets a word here too, but only while it is doing
+        # something: a closed microphone is the normal case and needs no notice.
+        voice = telemetry.voice
+        if voice.state.value not in ("OFF", ""):
+            line = f"{line} | MIC {voice.state.value}"
+        return line
 
     def render_shutdown(self, dt: float) -> bool:
         """Render one frame of the shutdown sequence.

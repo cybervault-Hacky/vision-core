@@ -12,10 +12,20 @@ chat widget dropped into the window. Three rules shape it:
   local answer is never presented as a model answer;
 * the panel owns no application state beyond the text being typed: everything it
   shows comes from the published :class:`~app.ai.types.AISnapshot`.
+
+Since Phase 8 the panel also carries the microphone control. It is a single row
+under the conversation, it is quiet, and it only ever shows the real state of the
+voice layer: ``MIC OFF`` with a TALK control, ``MIC LISTENING`` with an elapsed
+timer, a level meter fed by *measured* amplitude (an engine that reports nothing
+draws nothing), ``MIC PROCESSING`` while a transcript is being produced, and
+``MIC UNAVAILABLE`` with the real reason when the machine cannot listen at all.
+Microphone audio and transcripts stay between the panel row and the voice layer;
+this module never sees a sample.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -24,6 +34,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from app.ai.types import ChatMessage, ChatRole, ResponseSource
+from app.voice.types import VoiceSnapshot, VoiceState
 from ui.hud import (
     ai_status_color,
     COLOR_CYAN_PRIMARY,
@@ -35,6 +46,7 @@ from ui.hud import (
     COLOR_STANDBY,
     COLOR_TEXT_MUTED,
     COLOR_TEXT_WHITE,
+    voice_state_color,
 )
 
 # Panel geometry bounds (screen pixels).
@@ -48,6 +60,7 @@ HEADER_HEIGHT = 46
 STATUS_HEIGHT = 32
 INPUT_HEIGHT = 30
 CONFIRM_HEIGHT = 30
+VOICE_HEIGHT = 26
 PAD = 12
 BUBBLE_PAD = 8
 GAP = 8
@@ -56,6 +69,11 @@ MAX_BLOCKS = 40
 MAX_INPUT_CHARS = 600
 CARET_PERIOD = 1.0
 WORKING_HEIGHT = 24
+# Segments in the microphone level meter and how much the displayed level moves
+# towards the measured one each frame (fast attack, slow release).
+LEVEL_SEGMENTS = 12
+LEVEL_ATTACK = 0.55
+LEVEL_RELEASE = 0.10
 
 # Accent for an assistant-generated result line, keyed by its detail tag.
 _NOTE_ACCENT = {
@@ -113,8 +131,12 @@ class AIPanel:
         self._confirm_rect = pygame.Rect(0, 0, 0, 0)
         self._cancel_rect = pygame.Rect(0, 0, 0, 0)
         self._strip_rect = pygame.Rect(0, 0, 0, 0)
+        self._voice_rect = pygame.Rect(0, 0, 0, 0)
+        self._microphone_rect = pygame.Rect(0, 0, 0, 0)
         self._conversation_rect = pygame.Rect(0, 0, 0, 0)
         self._blocks = 0
+        self._level_shown = 0.0
+        self._voice: VoiceSnapshot = VoiceSnapshot()
 
     # -- state ------------------------------------------------------------- #
 
@@ -167,6 +189,8 @@ class AIPanel:
             return "clear"
         if self._send_rect.collidepoint(position):
             return "send"
+        if self._microphone_rect.collidepoint(position):
+            return "microphone"
         if self._strip_rect.collidepoint(position):
             if self._confirm_rect.collidepoint(position):
                 return "confirm"
@@ -196,11 +220,23 @@ class AIPanel:
         self._clear_rect = pygame.Rect(self._close_rect.left - 58, rect.top + 12, 52, 20)
         self._send_rect = pygame.Rect(rect.right - PAD - 54, rect.bottom - INPUT_HEIGHT - 8, 54, 22)
 
-        strip_top = rect.bottom - INPUT_HEIGHT - 8 - CONFIRM_HEIGHT - 6
+        # Rows are stacked from the bottom: input, microphone, confirmation. The
+        # microphone row sits above the typing field so the control is always in
+        # the same place and can never be clipped; the confirmation strip is only
+        # drawn while a proposal is pending.
+        input_top = rect.bottom - INPUT_HEIGHT - 8
+        voice_top = input_top - VOICE_HEIGHT - 6
+        self._voice_rect = pygame.Rect(
+            rect.left + PAD, voice_top, rect.width - 2 * PAD, VOICE_HEIGHT
+        )
+        self._microphone_rect = pygame.Rect(
+            rect.right - PAD - 58, voice_top + 2, 58, VOICE_HEIGHT - 4
+        )
+
+        strip_top = voice_top - CONFIRM_HEIGHT - 6
         self._strip_rect = pygame.Rect(
             rect.left + PAD, strip_top, rect.width - 2 * PAD, CONFIRM_HEIGHT
         )
-        self._confirm_rect = pygame.Rect(rect.right - PAD - 86, strip_top + 4, 80, 22)
         self._cancel_rect = pygame.Rect(rect.right - PAD - 76, strip_top + 4, 70, 22)
         self._confirm_rect = pygame.Rect(self._cancel_rect.left - 88, strip_top + 4, 80, 22)
 
@@ -213,10 +249,12 @@ class AIPanel:
         """
         rect = self.rect
         top = rect.top + HEADER_HEIGHT + (STATUS_HEIGHT if has_line else 20)
-        bottom = rect.bottom - INPUT_HEIGHT - 14
+        bottom = self._voice_rect.top - 4
         if has_confirm:
-            bottom -= CONFIRM_HEIGHT + 8
-        return pygame.Rect(rect.left + PAD, top, rect.width - 2 * PAD, max(40, bottom - top))
+            bottom = self._strip_rect.top - 4
+        return pygame.Rect(
+            rect.left + PAD, top, rect.width - 2 * PAD, max(30, bottom - top)
+        )
 
     # -- rendering --------------------------------------------------------- #
 
@@ -228,11 +266,18 @@ class AIPanel:
         context_line: str,
         fonts: Dict[str, pygame.font.Font],
         now: Optional[float] = None,
+        voice=None,
     ) -> None:
-        """Draw the panel from the assistant snapshot."""
+        """Draw the panel from the assistant snapshot.
+
+        ``voice`` is the published :class:`~app.voice.types.VoiceSnapshot`. It is
+        optional so the panel can be drawn on its own; with nothing published the
+        row reports the microphone as unavailable rather than guessing at it.
+        """
         self.rect = rect
         self._layout_parts()
         now = time.perf_counter() if now is None else now
+        self._voice = voice if voice is not None else VoiceSnapshot()
 
         self._draw_glass(surface, rect)
 
@@ -252,6 +297,7 @@ class AIPanel:
         self._draw_conversation(surface, conversation, messages, snapshot, fonts)
         if snapshot.pending is not None:
             self._draw_confirmation(surface, snapshot, fonts)
+        self._draw_voice(surface, self._voice, fonts)
         self._draw_input(surface, rect, snapshot, fonts, now)
 
     # -- parts ------------------------------------------------------------- #
@@ -385,7 +431,8 @@ class AIPanel:
                 y = area.top
             if not blocks and not snapshot.busy:
                 empty = fonts["caption"].render(
-                    "Ask about the camera, tracking, gestures or the current mode.",
+                    "Ask about the camera, tracking, gestures or the current mode, "
+                    "or press V and speak.",
                     True,
                     COLOR_TEXT_MUTED,
                 )
@@ -432,10 +479,20 @@ class AIPanel:
         else:
             accent = COLOR_ICE_BLUE
 
+        # A message is labelled with how it arrived and where the answer came
+        # from: YOU - VOICE for a transcript, VISIONCORE - LOCAL for a
+        # deterministic answer, SYSTEM for a gate result.
+        if message.role is ChatRole.USER:
+            tag_text, tag_color = message.source_label, COLOR_CYAN_PRIMARY
+        elif message.source is not ResponseSource.SYSTEM:
+            tag_text, tag_color = message.source.label, COLOR_TEXT_MUTED
+        else:
+            tag_text, tag_color = "", COLOR_TEXT_MUTED
+
         label = fonts["mono_small"].render(message.role.label.upper(), True, accent)
         surface.blit(label, (area.left + BUBBLE_PAD, y))
-        if message.role is not ChatRole.USER and message.source is not ResponseSource.SYSTEM:
-            tag = fonts["mono_small"].render(message.source.label, True, COLOR_TEXT_MUTED)
+        if tag_text:
+            tag = fonts["mono_small"].render(tag_text, True, tag_color)
             surface.blit(tag, (area.left + BUBBLE_PAD + label.get_width() + 8, y))
 
         bubble = pygame.Rect(area.left, y + 14, area.width, height - 14)
@@ -514,6 +571,134 @@ class AIPanel:
         )
         self._draw_button(surface, self._confirm_rect, "CONFIRM", COLOR_ONLINE, fonts, True)
         self._draw_button(surface, self._cancel_rect, "CANCEL", COLOR_ERROR, fonts, True)
+
+    def _draw_voice(
+        self,
+        surface: pygame.Surface,
+        voice: VoiceSnapshot,
+        fonts: Dict[str, pygame.font.Font],
+    ) -> None:
+        """The microphone row: real state, real level, one deliberate control.
+
+        Drawn for every microphone state, including ``UNAVAILABLE``: on a machine
+        that cannot listen, the row says so instead of leaving the user to find
+        out by pressing the key. Everything shown here comes from the published
+        :class:`~app.voice.types.VoiceSnapshot`, so the row can never claim the
+        microphone is open while it is closed.
+        """
+        row = self._voice_rect
+        state = voice.state
+        listening = state.listening
+        color = voice_state_color(state)
+
+        pygame.draw.rect(surface, (10, 19, 30), row)
+        pygame.draw.rect(surface, COLOR_PANEL_BORDER, row, 1)
+
+        # A slow pulse on the row edge and on the status dot, while the
+        # microphone is genuinely open. The pulse is driven by the state, never
+        # by the meter: a silent room still shows an open microphone.
+        pulse = 0.5 + 0.5 * math.sin(time.perf_counter() * 3.0)
+        dot = color
+        if listening:
+            edge = tuple(int(channel * (0.35 + 0.65 * pulse)) for channel in COLOR_STANDBY)
+            pygame.draw.line(
+                surface, edge, (row.left + 1, row.top), (row.left + 1, row.bottom), 2
+            )
+            dot = tuple(int(channel * (0.5 + 0.5 * pulse)) for channel in color)
+        pygame.draw.circle(surface, dot, (row.left + 11, row.centery), 3)
+
+        label = fonts["mono_small"].render(f"MIC {voice.status_label}", True, color)
+        surface.blit(label, (row.left + 19, row.centery - label.get_height() // 2))
+
+        detail_x = row.left + 19 + label.get_width() + 10
+        hint = fonts["mono_small"].render("[V]", True, COLOR_TEXT_MUTED)
+        meter_right = self._microphone_rect.left - hint.get_width() - 16
+        room = max(20, meter_right - detail_x)
+
+        measured = voice.level
+        if listening and measured is not None:
+            # The engine is measuring the microphone: show the measurement and
+            # the elapsed window, so "listening" is backed by real amplitude.
+            meter = pygame.Rect(detail_x, row.centery - 3, room, 6)
+            self._draw_level(surface, meter, measured, color)
+        else:
+            detail = _fit(self._voice_detail(voice), fonts["mono_small"], room)
+            if detail:
+                text = fonts["mono_small"].render(detail, True, COLOR_TEXT_MUTED)
+                surface.blit(text, (detail_x, row.centery - text.get_height() // 2))
+
+        surface.blit(
+            hint, hint.get_rect(midright=(self._microphone_rect.left - 6, row.centery))
+        )
+
+        if state.active:
+            label_text, button_color, enabled = "CANCEL", COLOR_ERROR, True
+        elif voice.available:
+            label_text, button_color, enabled = "TALK", color, True
+        else:
+            # No engine or no input device: the control is inert, not a promise.
+            label_text, button_color, enabled = "MIC", COLOR_DISABLED, False
+        self._draw_button(
+            surface, self._microphone_rect, label_text, button_color, fonts, enabled
+        )
+
+    @staticmethod
+    def _voice_detail(voice: VoiceSnapshot) -> str:
+        """What the microphone state means, in as few words as fit.
+
+        ``note`` is whatever the layer last reported - a timeout, a cancellation,
+        a failure or the engine in use - so the row explains the state instead of
+        only naming it.
+        """
+        state = voice.state
+        reason = voice.note or voice.detail
+        if state is VoiceState.LISTENING:
+            return (
+                f"{voice.listening_seconds:.1f}s OF {voice.limit_seconds:.0f}s"
+                " - V CANCELS"
+            )
+        if state is VoiceState.PROCESSING:
+            return f"TRANSCRIBING LOCALLY ({voice.engine})"
+        if state is VoiceState.READY:
+            return f"TRANSCRIPT SENT ({voice.engine})"
+        if state is VoiceState.UNAVAILABLE:
+            return reason or "NO LOCAL SPEECH ENGINE"
+        if state is VoiceState.ERROR:
+            return reason or "RECOGNITION FAILED - PRESS V TO RETRY"
+        if voice.note:
+            return f"{voice.note} - PRESS V TO LISTEN"
+        return f"PRESS V TO LISTEN ({voice.engine})"
+
+    def _draw_level(
+        self,
+        surface: pygame.Surface,
+        meter: pygame.Rect,
+        level: float,
+        color: Tuple[int, int, int],
+    ) -> None:
+        """A meter driven by measured amplitude only.
+
+        The value comes from the recogniser's own audio callback. It is smoothed
+        (quick attack, slow release) so a single frame of audio does not blink,
+        and it is shown exactly as measured: a silent microphone lights nothing.
+        No synthetic waveform is ever drawn, because a meter that moved on its
+        own would be a lie about whether the microphone is working.
+        """
+        target = max(0.0, min(1.0, float(level)))
+        rate = LEVEL_ATTACK if target > self._level_shown else LEVEL_RELEASE
+        self._level_shown += (target - self._level_shown) * rate
+        shown = max(0.0, min(1.0, self._level_shown))
+
+        lit = int(round(shown * LEVEL_SEGMENTS))
+        gap = 2
+        segment = max(2, (meter.width - gap * (LEVEL_SEGMENTS - 1)) // LEVEL_SEGMENTS)
+        for index in range(LEVEL_SEGMENTS):
+            bar = pygame.Rect(
+                meter.left + index * (segment + gap), meter.top, segment, meter.height
+            )
+            pygame.draw.rect(
+                surface, color if index < lit else (24, 38, 54), bar
+            )
 
     def _draw_input(
         self,

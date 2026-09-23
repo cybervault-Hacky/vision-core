@@ -15,9 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
-from app.controls.safety import ControlState
+from app.controls.safety import ControlMode, ControlState
 from app.gestures.types import Gesture, GesturePhase
 from app.hand_tracking import TrackingState
+from app.voice.types import VoiceState
 
 if TYPE_CHECKING:  # avoids an import cycle: app.state imports the AI snapshot
     from app.state import Telemetry
@@ -55,6 +56,18 @@ class AIContext:
     quality: str = "SEARCHING"
     tracking_engine: str = "UNKNOWN"
     emergency_stops: int = 0
+    # Voice input state (Phase 8). The microphone is only ever open because the
+    # user asked for it; "OFF" is the truthful default.
+    voice_state: str = VoiceState.OFF.value
+    voice_engine: str = "NONE"
+    voice_detail: str = ""
+    voice_available: bool = False
+    # Which input the current message arrived on (TEXT / VOICE / ...), so a
+    # transcript can be treated as one (it may contain recognition errors).
+    input_source: str = "TEXT"
+    # One deterministic clause describing what the user is doing right now,
+    # derived from real tracking and mode values - never guessed.
+    activity: str = "nothing is being tracked yet"
 
     # -- rendering --------------------------------------------------------- #
 
@@ -84,6 +97,12 @@ class AIContext:
             ),
             "recent_actions: "
             + (", ".join(self.recent_actions) if self.recent_actions else "none"),
+            f"activity: {self.activity}",
+            "voice_input: "
+            + self.voice_state
+            + (f" (engine {self.voice_engine})" if self.voice_available else " (no engine)")
+            + self._suffix(self.voice_detail),
+            f"input_source: {self.input_source}",
             f"device_actions_performed: {self.device_action_count}",
             f"emergency_stops_this_session: {self.emergency_stops}",
             f"render_fps: {self.render_fps:.0f}" if self.render_fps > 0 else "render_fps: unknown",
@@ -163,6 +182,7 @@ def build_context(telemetry: "Telemetry") -> AIContext:
     )
     recent = tuple(entry.display_label for entry in telemetry.feedback[:RECENT_ACTION_LIMIT])
 
+    voice = telemetry.voice
     return AIContext(
         camera_state=str(telemetry.camera.value),
         camera_detail=str(camera_detail)[:120],
@@ -189,7 +209,85 @@ def build_context(telemetry: "Telemetry") -> AIContext:
         quality=telemetry.interaction.quality.label,
         tracking_engine=telemetry.tracking_engine,
         emergency_stops=telemetry.control_emergency_stops,
+        voice_state=voice.state.value,
+        voice_engine=voice.engine,
+        voice_detail=voice.note,
+        voice_available=voice.available,
+        activity=describe_activity(
+            gesture=telemetry.gesture.value,
+            mode=telemetry.control_mode.value,
+            tracking_state=telemetry.tracking_state.value,
+            hands=telemetry.hands_detected,
+        ),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Activity description: what the user is doing, from real values only
+# --------------------------------------------------------------------------- #
+
+# What each pose means *in a given mode*. Nothing here is invented: every entry
+# is the gesture mapping the control layers actually implement.
+_ACTIVITY_PHRASES: Dict[str, Tuple[str, str]] = {
+    # gesture: (MOUSE mode phrasing, DEVICE mode phrasing)
+    Gesture.POINT.value: ("pointing", "pointing (the pointer layer is idle in DEVICE mode)"),
+    Gesture.PINCH.value: (
+        "pinching",
+        "pinching (a pinch toggles mute once in DEVICE mode)",
+    ),
+    Gesture.TWO_FINGER.value: (
+        "holding two fingers",
+        "holding two fingers (vertical travel is volume in DEVICE mode)",
+    ),
+    Gesture.FIST.value: (
+        "holding a fist (no action in MOUSE mode)",
+        "holding a fist (vertical travel is brightness in DEVICE mode)",
+    ),
+    Gesture.OPEN_PALM.value: (
+        "holding an open palm (held still it trips the emergency stop)",
+        "holding an open palm (a brief palm is play/pause; held it stops everything)",
+    ),
+    Gesture.SWIPE_LEFT.value: (
+        "swiping left (no action in MOUSE mode)",
+        "swiping left (previous track in DEVICE mode)",
+    ),
+    Gesture.SWIPE_RIGHT.value: (
+        "swiping right (no action in MOUSE mode)",
+        "swiping right (next track in DEVICE mode)",
+    ),
+}
+
+
+def describe_activity(
+    gesture: str,
+    mode: str,
+    tracking_state: str,
+    hands: int,
+) -> str:
+    """One clause describing the current activity from real state only.
+
+    Used by the assistant (and shown in its state block), so an answer like
+    "you are currently pointing in MOUSE mode" is something VisionCore measured
+    rather than something a model guessed.
+    """
+    if hands <= 0 or tracking_state not in (
+        TrackingState.TRACKING.value,
+        TrackingState.DETECTING.value,
+    ):
+        if tracking_state == TrackingState.HAND_LOST.value:
+            return "no hand is being tracked (the last hand was lost)"
+        return "no hand is being tracked right now"
+    if gesture == Gesture.NONE.value:
+        return f"holding no recognised gesture in {mode} mode"
+    mouse_phrase, device_phrase = _ACTIVITY_PHRASES.get(
+        gesture, (f"showing {gesture}", f"showing {gesture}")
+    )
+    phrase = device_phrase if mode == ControlMode.DEVICE.value else mouse_phrase
+    if mode == ControlMode.DEVICE.value and gesture not in _ACTIVITY_PHRASES:
+        return f"showing {gesture} in DEVICE mode"
+    if mode not in (ControlMode.MOUSE.value, ControlMode.DEVICE.value):
+        return f"showing {gesture}"
+    return f"{phrase} in {mode} mode"
 
 
 # --------------------------------------------------------------------------- #
@@ -204,7 +302,7 @@ def tracked_gestures() -> Tuple[Tuple[str, str], ...]:
         (Gesture.PINCH.value, "clicks, and holding it drags"),
         (Gesture.TWO_FINGER.value, "scrolls (volume in DEVICE mode)"),
         (Gesture.OPEN_PALM.value, "held still for a moment, trips the emergency stop"),
-        (Gesture.FIST.value, "locks control (brightness in DEVICE mode)"),
+        (Gesture.FIST.value, "no action in MOUSE mode (brightness in DEVICE mode)"),
         (Gesture.SWIPE_LEFT.value, "previous track in DEVICE mode"),
         (Gesture.SWIPE_RIGHT.value, "next track in DEVICE mode"),
     )

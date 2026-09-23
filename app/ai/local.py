@@ -29,13 +29,15 @@ from app.ai.context import (
     tracking_states,
 )
 from app.ai.router import describe_actions
+from app.ai.commands import spoken_examples
 
 _NO_PROVIDER_NOTE = (
     "No AI provider is configured, so this is a local, deterministic answer rather "
     "than a model reply. I can still answer questions about VisionCore's own state "
-    "(camera, tracking, gesture, mode, recent actions); asking me to act on volume, "
-    "media or windows needs a configured provider - set VISIONCORE_AI_PROVIDER and "
-    "VISIONCORE_AI_API_KEY to enable it."
+    "(camera, tracking, gesture, mode, recent actions) and carry out the plain "
+    "commands I recognise literally - for example \"turn the volume up\" or "
+    "\"put me in device mode\". Anything freer needs a configured provider: set "
+    "VISIONCORE_AI_PROVIDER and VISIONCORE_AI_API_KEY to enable one."
 )
 
 _PUNCTUATION = re.compile(r"[^a-z0-9\s']")
@@ -154,6 +156,59 @@ def _gesture_answer(ctx: AIContext) -> str:
     )
 
 
+def _activity_answer(ctx: AIContext) -> str:
+    """'What am I doing right now?' - answered from measured state only."""
+    if ctx.hand_count <= 0 or ctx.activity.startswith("no hand"):
+        return (
+            f"There is nothing to describe yet: {ctx.activity}. Tracking is "
+            f"{ctx.tracking_state} (quality {ctx.quality}); bring one hand into the "
+            "camera frame and hold it still."
+        )
+    if ctx.gesture == "NONE":
+        detail = (
+            f" No pose is held right now (tracking confidence "
+            f"{_percent(ctx.tracking_confidence)}, quality {ctx.quality})."
+        )
+    else:
+        detail = (
+            f" The pose is {ctx.gesture}, phase {ctx.gesture_phase}, at "
+            f"{_percent(ctx.gesture_confidence)} confidence."
+        )
+        for name, description in tracked_gestures():
+            if name == ctx.gesture:
+                detail += f" In this mode it {description}."
+                break
+    return f"You are currently {ctx.activity}.{detail}"
+
+
+def _voice_answer(ctx: AIContext) -> str:
+    """Microphone state, told exactly as it is."""
+    state = ctx.voice_state
+    if state == "LISTENING":
+        return (
+            "The microphone is open right now (LISTENING). Speak your request, or "
+            "press V again to cancel it. Nothing is recorded to disk and no audio "
+            "leaves this machine."
+        )
+    if state == "PROCESSING":
+        return "Audio has been captured and is being transcribed locally."
+    if state == "READY":
+        return "The last transcription finished; the microphone is closed again."
+    if state == "ERROR":
+        return f"Voice input reported an error: {ctx.voice_detail or 'engine failure'}."
+    if state == "UNAVAILABLE" or not ctx.voice_available:
+        return (
+            f"Voice input is unavailable on this machine: "
+            f"{ctx.voice_detail or 'no local speech engine or microphone'}. "
+            "Typed messages and every gesture still work exactly as before."
+        )
+    return (
+        f"The microphone is OFF (engine {ctx.voice_engine}). Press V or the "
+        "microphone control in the assistant panel to listen; it only opens when "
+        "you ask for it."
+    )
+
+
 def _camera_answer(ctx: AIContext) -> str:
     if ctx.camera_state == "ONLINE":
         detail = ctx.camera_detail or "resolution not reported"
@@ -190,7 +245,7 @@ def _stopped_answer(ctx: AIContext) -> str:
     return "Both control layers are running, so nothing has stopped them."
 
 
-def _gesture_help_answer() -> str:
+def _gesture_help_answer(_ctx: AIContext) -> str:
     lines = [f"- {name}: {description}" for name, description in tracked_gestures()]
     phases = " / ".join(gesture_phases())
     return (
@@ -200,7 +255,7 @@ def _gesture_help_answer() -> str:
     )
 
 
-def _tracking_help_answer() -> str:
+def _tracking_help_answer(_ctx: AIContext) -> str:
     lines = [f"- {name}: {label}" for name, label in tracking_states()]
     return "Tracking moves through these states:\n" + "\n".join(lines)
 
@@ -210,6 +265,14 @@ def _capability_answer(ctx: AIContext) -> str:
         "I can answer questions about VisionCore's own state and request a single "
         "allowlisted action through the normal safety gates.",
         f"Actions available: {describe_actions()}.",
+        "Plain commands I recognise without a provider: "
+        + ", ".join(f'"{example}"' for example in spoken_examples())
+        + ".",
+        (
+            "Voice input is available: press V to speak."
+            if ctx.voice_available
+            else "Voice input is unavailable here, so please type instead."
+        ),
     ]
     if ctx.capabilities:
         offered = ", ".join(
@@ -321,6 +384,34 @@ _RULES: Sequence[Tuple[str, Tuple[str, ...], Callable[[AIContext], str]]] = (
         _tracking_help_answer,
     ),
     (
+        "activity",
+        (
+            "what am i doing",
+            "what is my hand doing",
+            "what's my hand doing",
+            "what am i holding",
+            "what am i showing",
+            "what am i currently doing",
+            "describe what i am doing",
+        ),
+        _activity_answer,
+    ),
+    (
+        "voice",
+        (
+            "microphone",
+            "mic on",
+            "mic off",
+            "listening",
+            "can you hear me",
+            "are you listening",
+            "voice input",
+            "voice control",
+            "speech input",
+        ),
+        _voice_answer,
+    ),
+    (
         "gesture",
         (
             "what gesture",
@@ -344,7 +435,7 @@ _RULES: Sequence[Tuple[str, Tuple[str, ...], Callable[[AIContext], str]]] = (
             "what gestures",
             "gesture list",
         ),
-        lambda _ctx: _gesture_help_answer(),
+        _gesture_help_answer,
     ),
     (
         "camera",

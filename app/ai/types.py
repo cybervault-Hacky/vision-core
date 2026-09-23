@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Tuple
 
+from app.interaction.multimodal import InputEnvelope, InputSource
+
 
 class ChatRole(str, Enum):
     """Who produced a conversation entry."""
@@ -120,17 +122,34 @@ class AIErrorKind(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class ChatMessage:
-    """One conversation entry (memory only, never persisted)."""
+    """One conversation entry (memory only, never persisted).
+
+    A user entry also carries the :class:`~app.interaction.multimodal.InputEnvelope`
+    it arrived in, so the panel can label a spoken message ``YOU - VOICE`` and a
+    typed one ``YOU - TEXT`` without keeping a second history anywhere.
+    """
 
     role: ChatRole
     content: str
     timestamp: float = 0.0
     source: ResponseSource = ResponseSource.SYSTEM
     detail: str = ""
+    input: InputEnvelope = field(
+        default_factory=lambda: InputEnvelope.query(InputSource.TEXT, "")
+    )
 
     @property
     def label(self) -> str:
         return self.role.label
+
+    @property
+    def source_label(self) -> str:
+        """Role plus how it arrived: ``YOU - VOICE`` / ``VISIONCORE - LOCAL``."""
+        if self.role is ChatRole.USER:
+            return f"{self.role.label.upper()} - {self.input.label}"
+        if self.role is ChatRole.ASSISTANT:
+            return f"{self.role.label.upper()} - {self.source.label}"
+        return self.role.label.upper()
 
 
 @dataclass(frozen=True, slots=True)

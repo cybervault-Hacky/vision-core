@@ -21,6 +21,7 @@ from app.gestures.types import (
     GestureState,
 )
 from app.ai.types import AISnapshot
+from app.voice.types import VoiceSnapshot
 from app.hand_tracking import TrackingState
 from app.interaction.feedback import ActionFeedback
 from app.interaction.states import InteractionSnapshot
@@ -190,6 +191,10 @@ class Telemetry:
     ai: AISnapshot = field(default_factory=AISnapshot)
     ai_panel_visible: bool = False
 
+    # Voice input (Phase 8). Also a snapshot only: the microphone belongs to the
+    # voice controller, and ``voice.state`` is OFF until the user activates it.
+    voice: VoiceSnapshot = field(default_factory=VoiceSnapshot)
+
     # Error handling context
     error_title: Optional[str] = None
     error_message: Optional[str] = None
@@ -323,6 +328,10 @@ class Telemetry:
     def update_ai(self, snapshot: AISnapshot) -> None:
         """Publish the assistant snapshot for this frame."""
         self.ai = snapshot
+
+    def update_voice(self, snapshot: VoiceSnapshot) -> None:
+        """Publish the voice input snapshot for this frame."""
+        self.voice = snapshot
 
     def set_device_unavailable(self) -> None:
         """Mark device control as not running (shutdown / camera loss)."""

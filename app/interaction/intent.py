@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Union
 
 from app.interaction.states import ActionTier
 
@@ -43,11 +43,15 @@ class IntentSource(str, Enum):
     GESTURE = "GESTURE"
     INTERFACE = "INTERFACE"
     AI = "AI"
-    VOICE = "VOICE"          # reserved: no voice input is implemented
+    # Reserved: a transcript does not travel this route. Speech is transcribed
+    # into text and handled by the assistant, so an action produced from voice
+    # carries ``AI`` - exactly like one produced from a typed message. This value
+    # stays for a future *direct* voice control route, and nothing constructs it.
+    VOICE = "VOICE"
 
     @property
     def available(self) -> bool:
-        """False for sources that have no implementation behind them."""
+        """False for sources that no code path currently produces."""
         return self is not IntentSource.VOICE
 
     @property
@@ -135,7 +139,11 @@ class IntentOutcome:
         return self.intent.label or self.intent.kind.label
 
 
-Handler = Callable[[Intent], bool]
+# A handler returns True when it carried the intent out, False when it refused.
+# It may return a string instead of False to *explain* the refusal: the real
+# reason a controller gave is what the interface and the assistant should report,
+# rather than a generic "refused".
+Handler = Callable[[Intent], Union[bool, str]]
 
 
 class IntentRouter:
@@ -187,10 +195,13 @@ class IntentRouter:
 
         self.dispatched += 1
         try:
-            handled = bool(handler(intent))
+            result = handler(intent)
         except Exception as exc:  # a handler must never take the application down
             logger.warning("Intent %s failed: %s", intent.kind.value, exc)
             return IntentOutcome(intent, True, False, "HANDLER ERROR")
+        if isinstance(result, str):
+            return IntentOutcome(intent, True, False, result or "REFUSED")
+        handled = bool(result)
         return IntentOutcome(intent, True, handled, "" if handled else "REFUSED")
 
     # -- introspection ----------------------------------------------------- #
