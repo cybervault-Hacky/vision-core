@@ -11,9 +11,10 @@ import pygame
 from app.ai.types import AIStatus
 from app.controls import ControlAction, ControlMode, ControlState
 from app.gestures import Gesture, GesturePhase, GestureState
-from app.state import SubsystemState, Telemetry
+from app.state import AppState, SubsystemState, Telemetry
 from app.voice.types import VoiceState
 from ui.animations import PulseAnimation
+from version import VERSION
 
 # Visual Palette
 COLOR_BG_DARK = (8, 12, 18)
@@ -225,10 +226,12 @@ class HUDManager:
         title_surf = fonts["title"].render("VISIONCORE", True, COLOR_TEXT_WHITE)
         surface.blit(title_surf, (rect.left + 20, rect.top + 10))
 
-        # No capability claim beyond what the project actually does: on-device
-        # landmark inference, no cloud service, no hosted model.
+        # Landmark inference is on-device. The optional AI provider is a
+        # separate, explicitly configured capability shown in its own panel.
         sub_surf = fonts["caption"].render(
-            "LOCAL VISION INTERFACE // ON-DEVICE INFERENCE", True, COLOR_CYAN_PRIMARY
+            f"LOCAL VISION INTERFACE // ON-DEVICE INFERENCE // v{VERSION}",
+            True,
+            COLOR_CYAN_PRIMARY,
         )
         surface.blit(sub_surf, (rect.left + 20, rect.top + 34))
 
@@ -236,17 +239,31 @@ class HUDManager:
 
         badge_x = rect.right - 250
         badge_y = rect.top + 12
+        badge_label, badge_color = self._system_badge(telemetry)
 
-        dot_color = tuple(int(channel * self._pulse.value) for channel in COLOR_ONLINE)
+        dot_color = tuple(int(channel * self._pulse.value) for channel in badge_color)
         pygame.draw.circle(surface, dot_color, (badge_x, badge_y + 8), 5)
 
-        badge_text = fonts["subheading"].render("SYSTEM ONLINE", True, COLOR_ONLINE)
+        badge_text = fonts["subheading"].render(badge_label, True, badge_color)
         surface.blit(badge_text, (badge_x + 14, badge_y))
 
         uptime_text = fonts["mono"].render(
             f"UPTIME {telemetry.formatted_uptime}", True, COLOR_TEXT_MUTED
         )
         surface.blit(uptime_text, (badge_x + 14, badge_y + 20))
+
+    @staticmethod
+    def _system_badge(telemetry: Telemetry) -> Tuple[str, Tuple[int, int, int]]:
+        """Return a truthful high-level badge for the current lifecycle state."""
+        if telemetry.app_state is AppState.BOOTING:
+            return "INITIALIZING", COLOR_STANDBY
+        if telemetry.app_state is AppState.CAMERA_ERROR:
+            return "CAMERA UNAVAILABLE", COLOR_ERROR
+        if telemetry.app_state is AppState.SHUTTING_DOWN:
+            return "SHUTTING DOWN", COLOR_STANDBY
+        if telemetry.app_state is AppState.STOPPED:
+            return "SYSTEM IDLE", COLOR_DISABLED
+        return "SYSTEM ONLINE", COLOR_ONLINE
 
     def _draw_interaction_chip(
         self,

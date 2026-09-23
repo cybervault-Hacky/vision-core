@@ -10,6 +10,8 @@ import argparse
 import os
 import sys
 
+from version import DISPLAY_VERSION
+
 # Suppress Pygame and OpenCV noise before importing
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
@@ -30,37 +32,37 @@ def verify_python_version() -> None:
 
 
 def check_dependencies() -> None:
-    """Validate that required core packages are installed before booting."""
+    """Validate required runtime packages before constructing the application.
+
+    Imports are checked here instead of allowing a deep module import to fail
+    with an opaque traceback. Optional AI and voice packages are intentionally
+    absent from this check: the application reports those capabilities honestly
+    when they are not configured or installed.
+    """
     missing = []
     notes = []
 
-    try:
-        import cv2  # noqa: F401
-    except ImportError as exc:
-        missing.append("opencv-python-headless (or opencv-python)")
-        if "libGL" in str(exc):
-            # The OpenCV GUI build needs a system OpenGL library that headless
-            # hosts do not ship. Point at the fix instead of a generic failure.
-            notes.append(
-                "OpenCV loaded a GUI build that needs libGL. Either install the "
-                "system library (Debian/Ubuntu: sudo apt install -y libgl1) or run:\n"
-                "    pip install --force-reinstall --no-deps opencv-python-headless"
-            )
-
-    try:
-        import numpy  # noqa: F401
-    except ImportError:
-        missing.append("numpy")
-
-    try:
-        import pygame  # noqa: F401
-    except ImportError:
-        missing.append("pygame")
-
-    try:
-        import mediapipe  # noqa: F401
-    except ImportError:
-        missing.append("mediapipe")
+    checks = (
+        ("opencv-python-headless (or opencv-python)", "cv2"),
+        ("numpy", "numpy"),
+        ("pygame", "pygame"),
+        ("mediapipe", "mediapipe"),
+    )
+    for package, module in checks:
+        try:
+            __import__(module)
+        except Exception as exc:
+            detail = f" ({type(exc).__name__}: {exc})" if str(exc) else f" ({type(exc).__name__})"
+            missing.append(f"{package}{detail}")
+            if module == "cv2" and "libGL" in str(exc):
+                # The OpenCV GUI build needs a system OpenGL library that
+                # headless hosts do not ship. Point at the fix instead of a
+                # generic failure.
+                notes.append(
+                    "OpenCV loaded a GUI build that needs libGL. Either install the "
+                    "system library (Debian/Ubuntu: sudo apt install -y libgl1) or run:\n"
+                    "    python3 -m pip install --force-reinstall --no-deps 'opencv-python-headless>=4.8.0,<4.12'"
+                )
 
     if missing:
         sys.stderr.write(
@@ -68,7 +70,7 @@ def check_dependencies() -> None:
             "The following required packages are missing or unusable:\n"
             + "".join(f"  - {pkg}\n" for pkg in missing)
             + "\nPlease install required dependencies by running:\n"
-            "  pip install -r requirements.txt\n"
+            "  python3 -m pip install -r requirements.txt\n"
         )
         if notes:
             sys.stderr.write(
@@ -82,7 +84,13 @@ def parse_args() -> argparse.Namespace:
     """Parse optional CLI flags while keeping standard execution argument-free."""
     parser = argparse.ArgumentParser(
         prog="visioncore",
-        description="VisionCore — local-first computer vision system.",
+        description=f"{DISPLAY_VERSION} — local-first computer vision system.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=DISPLAY_VERSION,
+        help="Show the VisionCore release version and exit.",
     )
     parser.add_argument(
         "--diagnostics",
@@ -122,8 +130,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     """Primary application entry point."""
     verify_python_version()
-    check_dependencies()
-
+    # Parse help/version/diagnostics before importing or validating the desktop
+    # runtime. These commands remain useful in a clean environment where the
+    # optional display stack has not been installed yet.
     args = parse_args()
 
     if args.diagnostics:
@@ -131,6 +140,8 @@ def main() -> int:
         cam_idx = args.camera_index if args.camera_index is not None else 0
         print(SystemDiagnostics.format_report(camera_index=cam_idx))
         return 0
+
+    check_dependencies()
 
     try:
         from app.application import Application

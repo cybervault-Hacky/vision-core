@@ -6,8 +6,9 @@ tracking engine are asynchronous, so their steps stay at ``CHECKING``/``LOADING`
 until the application reports what actually happened - the sequence never claims
 a subsystem is ready before it is.
 
-The sequence is deliberately short, ends on ``SYSTEM READY`` and holds for a
-moment so the transition into the camera interface reads as intentional.
+The sequence is deliberately short, ends on a real ``SYSTEM READY`` or
+``RECOVERY REQUIRED`` result, and holds for a moment so the transition into the
+camera interface reads as intentional.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from ui.animations import ProgressAnimation, PulseAnimation, RotationAnimation
+from version import DISPLAY_VERSION
 from ui.hud import (
     COLOR_BG_DARK,
     COLOR_CYAN_PRIMARY,
@@ -61,7 +63,7 @@ class BootScreen:
         # Order matters: it is the order the interface genuinely comes up in.
         self.steps: List[BootStep] = [
             BootStep("01", "CAMERA", 0.18),
-            BootStep("02", "VISION ENGINE", 0.42),
+            BootStep("02", "TRACKING", 0.42),
             BootStep("03", "GESTURE ENGINE", 0.62),
             BootStep("04", "CONTROL LAYER", 0.78),
             BootStep("05", "HUD", 0.88),
@@ -85,7 +87,9 @@ class BootScreen:
     def notify_tracking_result(self, success: bool, message: str) -> None:
         """Hand tracking engine finished loading, or reported why it could not."""
         self.tracking_check_passed = success
-        self._settle("02", "READY" if success else "UNAVAILABLE")
+        disabled = "DISABLED" in (message or "").upper()
+        status = "READY" if success else ("DISABLED" if disabled else "UNAVAILABLE")
+        self._settle("02", status)
 
     def notify_gesture_result(self, success: bool, message: str = "") -> None:
         """Gesture recognition engine availability."""
@@ -135,6 +139,11 @@ class BootScreen:
                 step.status = status
 
         if not self.progress_anim.is_complete:
+            return False
+        # The progress bar is presentation only. Do not leave boot until every
+        # asynchronous check has reported a real result; a slow camera or
+        # tracker must remain CHECKING/LOADING rather than becoming READY.
+        if not all(step.completed for step in self.steps):
             return False
         if self._ready_since is None:
             self._ready_since = 0.0
@@ -223,13 +232,16 @@ class BootScreen:
 
         self.draw_tech_emblem(surface, (card_rect.centerx, card_y + 58), radius=36)
 
-        title_surf = fonts["title"].render("VISIONCORE", True, COLOR_TEXT_WHITE)
+        title_surf = fonts["title"].render(DISPLAY_VERSION.upper(), True, COLOR_TEXT_WHITE)
         surface.blit(title_surf, title_surf.get_rect(center=(card_rect.centerx, card_y + 116)))
 
-        if self.is_complete:
+        failure = any(step.is_failure for step in self.steps)
+        if self.is_complete and not failure:
             subtitle, subtitle_color = "SYSTEM READY", COLOR_ONLINE
+        elif failure and self.progress_anim.is_complete:
+            subtitle, subtitle_color = "RECOVERY REQUIRED", COLOR_ERROR
         else:
-            subtitle, subtitle_color = "INITIALIZING SYSTEM", COLOR_CYAN_PRIMARY
+            subtitle, subtitle_color = "SUBSYSTEM CHECK // INITIALIZING", COLOR_CYAN_PRIMARY
         sub_surf = fonts["caption"].render(subtitle, True, subtitle_color)
         surface.blit(sub_surf, sub_surf.get_rect(center=(card_rect.centerx, card_y + 140)))
 
@@ -285,10 +297,10 @@ class BootScreen:
         pct_surf = fonts["mono_small"].render(pct_text, True, COLOR_ICE_BLUE)
         surface.blit(pct_surf, pct_surf.get_rect(right=card_x + card_w - 40, bottom=bar_y - 4))
 
-        if self.is_complete:
-            msg, msg_col = "SYSTEM READY // INITIALIZING CAMERA HUD", COLOR_ONLINE
-        elif self.camera_check_passed is False and self.progress_anim.progress > 0.8:
-            msg, msg_col = "CAMERA PROBE FAILED // TRANSITIONING TO ERROR RECOVERY", COLOR_ERROR
+        if self.is_complete and not failure:
+            msg, msg_col = f"{DISPLAY_VERSION.upper()} // INITIALIZING CAMERA HUD", COLOR_ONLINE
+        elif failure and self.progress_anim.is_complete:
+            msg, msg_col = "SUBSYSTEM UNAVAILABLE // TRANSITIONING TO ERROR RECOVERY", COLOR_ERROR
         else:
             msg, msg_col = "SUBSYSTEM VALIDATION IN PROGRESS...", COLOR_TEXT_MUTED
 

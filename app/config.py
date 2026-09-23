@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from version import DISPLAY_VERSION
+
 if TYPE_CHECKING:  # imported lazily in the settings builders to keep imports shallow
     from app.controls.device_types import DeviceSettings
     from app.controls.safety import ControlSettings
@@ -30,7 +32,7 @@ class AppConfig:
     camera_height: int = 720
 
     # Display & UI settings
-    window_title: str = "VISIONCORE // ADVANCED VISION SYSTEM"
+    window_title: str = f"{DISPLAY_VERSION} // ADVANCED VISION SYSTEM"
     window_width: int = 1100
     window_height: int = 900
     min_window_width: int = 800

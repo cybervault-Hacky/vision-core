@@ -46,6 +46,14 @@ venv.bak/
 
 # Application runtime files & local logs
 *.log
+logs/
+runtime/
+*.pid
 config.local.json
+config.json
 recordings/
 screenshots/
+
+# Local environment files (never commit credentials)
+.env.*
+!.env.example
