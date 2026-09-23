@@ -2,7 +2,7 @@
 
 The engine is deliberately independent of the camera, the UI and any operating
 system control: it consumes hand landmarks and emits :class:`GestureResult`
-values that the HUD (and, in a later phase, a control layer) can read.
+values that the HUD and the safety-gated control layers can read.
 """
 
 from __future__ import annotations
@@ -71,8 +71,8 @@ class GestureResult:
     """Outcome of one recognition pass for a single hand.
 
     ``changed`` marks a transition (START or RELEASE) while ``active`` reports
-    whether a gesture is currently held - the distinction a future control layer
-    needs in order to turn a pinch into a press and a release into a lift.
+    whether a gesture is currently held - the distinction the control layers use
+    to turn a pinch into a press and a release into a lift.
     """
 
     gesture: Gesture = Gesture.NONE

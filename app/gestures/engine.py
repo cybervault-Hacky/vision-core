@@ -354,8 +354,8 @@ class GestureEngine:
         """Feed the motion buffer and fire a swipe when one is recognised.
 
         Swipes are only looked for while the held pose is not a pinch: pinch is
-        the highest priority pose and is reserved for future grab style
-        interactions, so it must not double as a swipe.
+        the highest priority pose and is already reserved for click/drag or mute
+        control, so it must not double as a swipe.
         """
         if session.stable is Gesture.PINCH:
             session.history.clear()

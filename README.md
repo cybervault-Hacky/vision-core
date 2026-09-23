@@ -1,575 +1,491 @@
 # VisionCore
 
-**VisionCore** is a high-performance, local-first computer vision framework designed for touchless device control using standard webcam hardware and real-time computer vision.
+**VisionCore v1.0.0** is a local-first desktop application for camera-based hand tracking, gesture recognition, and explicitly enabled touchless computer control. It combines an on-device vision pipeline with a dark, futuristic HUD, a safety-gated mouse layer, optional device controls, an optional AI assistant, and optional local voice input.
 
-It delivers a rock-solid desktop application architecture, a hardware camera capture pipeline, non-blocking asynchronous streaming, on-device hand landmark tracking, a geometry based real-time gesture recognition engine, opt-in touchless pointer control with a full safety layer, and a sci-fi inspired AI vision heads-up display (HUD).
+VisionCore reports the real state of each subsystem. A missing camera, microphone, display backend, speech engine, AI provider, or device capability is shown as unavailable instead of being presented as ready.
 
-> **Mouse control is opt-in.** VisionCore can drive the operating system pointer with the `POINT`, `PINCH` and `TWO_FINGER` gestures, but control always starts `DISABLED` on every launch and only moves the cursor after you enable it from the HUD (or with `C`). Keyboard, volume, media, shell and window control are **not** implemented.
+## Overview
 
----
+VisionCore is designed to run as one desktop application:
+
+```text
+Camera
+  ↓
+Hand tracking
+  ↓
+Gesture recognition
+  ↓
+Safety-gated control layer
+  ↓
+HUD and feedback
+  ↓
+Optional AI / local voice input
+```
+
+The core vision path runs locally. Camera frames and hand landmarks stay in memory. Voice input is optional, explicitly activated, and local-only. AI is disabled unless the user configures a provider and explicitly sends a request.
+
+VisionCore v1.0.0 is the final release state of the project. No additional roadmap phase is required.
 
 ## Features
 
-* ✓ **Futuristic camera interface**
-* ✓ **Local hand tracking** — MediaPipe hand landmark inference (21 landmarks per hand) running entirely on-device, on a dedicated worker thread
-* ✓ **Hand landmark visualization** — landmark nodes, bone connections, soft bloom and animated tracking brackets rendered over the live video
-* ✓ **Tracking confidence** — the real handedness classification score reported by the tracking engine (never synthesised)
-* ✓ **Handedness when available** — `LEFT` / `RIGHT` shown only when the engine returns a valid classification
-* ✓ **Real-time tracking HUD** — tracking states (`SEARCHING`, `ACQUIRING`, `LOCKED`, `LOST`), lock-on animation, released-pose fade and live pipeline telemetry
-* ✓ **Gesture recognition** — `OPEN_PALM`, `FIST`, `POINT`, `PINCH`, `TWO_FINGER`, `SWIPE_LEFT` and `SWIPE_RIGHT` classified from landmark geometry on-device, with no additional model and no cloud service
-* ✓ **Gesture stabilisation** — configurable consecutive-frame validation, release debounce and a neutral `NONE` state so an ambiguous hand never reports a wrong gesture
-* ✓ **Pinch detection** — thumb/index tip contact measured relative to palm scale (never raw pixels), with press/hold/release phases
-* ✓ **Point detection** — index-dominant pose with folded middle, ring and pinky fingers
-* ✓ **Open palm detection** — four-finger extension scoring that tolerates one poorly tracked finger
-* ✓ **Fist detection** — curled-finger evidence from every finger, independent of where the hand sits in frame
-* ✓ **Two-finger detection** — index and middle extended, ring and pinky folded, kept exclusive from `POINT`
-* ✓ **Swipe detection** — temporal left/right swipes from a bounded motion history with distance, velocity, direction-consistency, settle and cooldown checks
-* ✓ **Touchless pointer control** — the index fingertip drives the operating system cursor through a configurable control region, with independent cursor smoothing, speed and deadzone
-* ✓ **Pinch click and drag** — one pinch equals exactly one click; holding the pinch converts it into a drag and releases the button on release
-* ✓ **Two-finger scrolling** — vertical hand movement over a deadzone scrolls the wheel; a stationary hand never scrolls
-* ✓ **Control safety layer** — explicit control states, emergency stop (stable open palm), pointer gating on `POINT`, confidence and hand-loss suspension, and a guaranteed button release on every failure path
-* ✓ **Touchless device control** — a separate device layer beside the mouse layer: system volume, mute, media playback, track skipping, display brightness where the platform exposes it, safe window actions and an allowlisted application launcher
-* ✓ **Explicit control modes** — `MOUSE` (default) and `DEVICE`, switched only by a deliberate interface action (`M` / `D` or the panel button). The two layers never both act on one gesture, and a pinch can never be both a click and a mute
-* ✓ **Continuous volume and brightness** — `TWO_FINGER` (volume) and `FIST` (brightness) vertical travel, deadzoned, rate limited, clamped to the valid operating system range and stopped the instant the hand, the gesture or the tracking confidence goes away
-* ✓ **Event media control** — `PINCH` toggles mute once per pinch cycle, `OPEN_PALM` plays or pauses once per gesture cycle, `SWIPE_RIGHT` skips forward and `SWIPE_LEFT` skips back once per swipe
-* ✓ **Allowlisted application launcher** — `BROWSER`, `CALC` and `FILES` resolved per platform from a frozen allowlist of executables. Unknown keys are rejected and no gesture, hand coordinate or gesture name can ever become a command, an argument or a shell string
-* ✓ **Honest capability reporting** — volume, media, brightness, window actions and the launcher each report `READY` or `UNAVAILABLE` from a real platform probe. Features a platform cannot provide say so instead of pretending to work
+- Animated startup checks for the camera, tracking, gesture, control, and HUD subsystems.
+- Camera capture on a background worker with stale-frame dropping and clean release.
+- MediaPipe hand landmark tracking with 21 landmarks, handedness, confidence, and measured pipeline telemetry.
+- Geometry-based gesture recognition with temporal stability, release handling, confidence thresholds, and a neutral `NONE` state.
+- Opt-in touchless mouse control with pointer movement, click, drag, scrolling, pause, and emergency stop.
+- Separate `MOUSE` and `DEVICE` control modes so one gesture cannot operate both layers.
+- Platform capability probing for mouse, volume, mute, media, brightness, windows, and the allowlisted application launcher.
+- Optional OpenAI-compatible AI assistant with structured parsing and the existing safety gates.
+- Optional local voice input through Vosk or offline PocketSphinx integration; microphone access is off by default.
+- Honest recovery screens, unavailable states, action feedback, and a bounded shutdown sequence.
+- CLI diagnostics for Python, libraries, display state, platform information, and camera availability.
 
-* **Futuristic Boot Sequence**: Animated 2.4-second system initialization sequence probing core architecture, display subsystems, and camera hardware before entering active mode.
-* **Low-Latency Camera Pipeline**: Asynchronous background capture thread running independently of the UI thread, ensuring stutter-free rendering and zero frame drops.
-* **Aspect-Ratio Preserving Viewport**: Dynamic letterboxing/pillarboxing that adapts responsively to window resizing without stretching or distorting camera frames.
-* **Sci-Fi Camera HUD**:
-  * Original visual identity: deep dark slate backdrop, cool cyan accents, ice-blue telemetry, and neutral typography.
-  * Real-time hardware telemetry: resolution, camera FPS, render FPS, device index, and orientation.
-  * Live status matrix: truthful subsystem reporting (`VISION CORE: ONLINE`, `CAMERA: ONLINE`, `TRACKING: SEARCHING|ACTIVE|LOST`, `GESTURES: SEARCHING|ACTIVE|DISABLED`, `CONTROL: DISABLED`).
-  * Subtle scanning animations: central focus ring sweep, live indicator pulse, and sci-fi corner brackets.
-* **Gesture Recognition Pipeline**:
-  * `CAMERA → HAND TRACKING → LANDMARKS → GESTURE ENGINE → RECOGNISED GESTURE → HUD`.
-  * Landmark features only: finger extension is scored from wrist-to-tip reach and PIP joint angles, pinch from tip separation relative to palm scale. Nothing is matched against image templates or hard-coded screen regions.
-  * Geometry is normalised for hand size, distance, rotation, position and handedness (left and right hands use the same algorithms).
-  * Deterministic priority (`PINCH → POINT → TWO_FINGER → FIST → OPEN_PALM`) resolves overlapping evidence, and a confidence threshold keeps weak evidence in the neutral `NONE` state.
-  * Reported confidence is the measured geometric evidence of the selected pose - never a random or hard-coded value.
-  * Gesture transitions are explicit: `START`, `ACTIVE`, `RELEASE`, plus a `released` field and `changed` flag for the control layer of a later phase.
-  * Gesture HUD: dedicated readout panel, landmark chain highlighting for the fingers that produced the gesture, and a restrained effect per gesture (pinch lock ring, point direction chevrons, two-finger focus lines, open palm radial pulse, fist lock bracket, swipe motion trail).
-* **Hand Tracking Pipeline**:
-  * Capture → frame → hand tracker → 21 hand landmarks → HUD, with stale frames dropped so latency never accumulates.
-  * One Euro landmark smoothing: heavy jitter suppression while the hand is still, almost none while it moves, so the overlay stays glued to the hand.
-  * Tracking data model (`HandTrackingResult`: `detected`, `landmarks`, `confidence`, `handedness`, `bounding_box`, `timestamp`) ready for future gesture engines.
-  * Multi-hand capable configuration (`max_hands` up to 4); one hand is tracked by default for the best latency.
-  * Measured pipeline telemetry only: engine latency, pipeline rate and dropped frames.
-* **Interaction Experience** (Phase 6, all derived from real subsystem state):
-  * Typed interaction states resolved every frame: `INITIALIZING`, `SCANNING`, `HAND_DETECTED`, `TRACKING`, `READY`, `MOUSE_MODE`, `DEVICE_MODE`, `ACTION_EXECUTED`, `PAUSED`, `EMERGENCY_STOP`, `HAND_LOST`, `SHUTTING_DOWN`, with safety states resolved first.
-  * Central focus area: `SCANNING / NO HAND` -> `HAND DETECTED / ACQUIRING` -> `TRACKING / LOCKED` -> `GESTURE / PINCH` -> `ACTION / LEFT CLICK`, with animated transitions and a status ring (`SEARCHING`, `TRACKING`, `READY`, `ACTIVE`, `PAUSED`, `EMERGENCY`) whose acquisition arc is the tracker's measured lock progress.
-  * Reusable action feedback: a brief notification per real action result (`LEFT CLICK`, `DRAG START`, `SCROLL DOWN`, `VOLUME UP`, `NEXT TRACK`, `WINDOW SWITCH`, `APP LAUNCHED`, ...) which is reported as a refusal when the backend refuses, repeats coalesce into `xN` instead of spamming, and a safety state pins the notification until it clears.
-  * Recent action timeline: newest first, capped at 8 rows, kept in memory only and cleared on exit - no action history is written to disk.
-  * Tracking quality readout (`TRACKING LOCKED`, `TRACKING LOW CONFIDENCE`, `HAND LOST`) built from the tracker's own state and confidence, and a hand count that reports what the tracker actually sees.
-  * Mode aware telemetry: the mouse module reports real `POINTER`/`CLICK`/`SCROLL` readiness in `MOUSE` mode and reports itself suspended in `DEVICE` mode, while the device module reports the platform's real per-capability availability and the reason a capability is missing.
-  * Performance readout with measured values only: `FPS`, `TRACK ms`, `GESTURE ms`, `CONTROL ms`, shown as `--` until a value has actually been measured, and hideable with `P`.
-  * Safety-first shutdown sequence: control is released, device actions stopped, tracking stopped and the camera closed before `RELEASING CONTROL / STOPPING TRACKING / CAMERA OFF / SYSTEM IDLE` is displayed with the real result of each step.
-  * Voice-ready architecture: one priority ordered intent router (`gesture | text | voice` -> control layer); Phase 8 filled the reserved voice source with an explicitly activated, local speech input (see below).
-* **VisionCore AI Assistant** (Phase 7, optional and entirely separate from the vision pipeline):
-  * `CAMERA -> HAND TRACKING -> GESTURE ENGINE -> INTENT ROUTER (MOUSE | DEVICE | VISIONCORE AI) -> AI INTENT -> SAFETY GATE -> ALLOWED ACTION -> HUD`. The assistant is a *producer of intents*, never a controller: it cannot move the pointer, touch an operating system API, run a command or reach anything that existed before Phase 7.
-  * **Deliberate activation only**: press `A` or click `VISIONCORE AI` in the footer bar. The panel never opens by itself, a gesture can never send a message, and opening the panel never opens a microphone. Phase 7 itself is text in, text out; the explicit voice path is described below.
-  * **Bring your own provider (optional)**: `VISIONCORE_AI_PROVIDER`, `VISIONCORE_AI_API_KEY`, `VISIONCORE_AI_MODEL` (plus optional `VISIONCORE_AI_BASE_URL`, `VISIONCORE_AI_TIMEOUT_SEC`, `VISIONCORE_AI_MAX_TOKENS`, `VISIONCORE_AI_TEMPERATURE`). Without them VisionCore reports `AI / NOT CONFIGURED` and everything else keeps working.
-  * **Offline answers stay honest**: with no provider, questions about VisionCore's own state (`what mode am I in?`, `is tracking active?`, `what gesture is detected?`, `why isn't my cursor moving?`, `what did I just do?`) are answered locally and deterministically from real telemetry, and every such reply is tagged `LOCAL` so it is never confused with a model answer.
-  * **Real context, nothing else**: the assistant receives a small constructed state block (camera state, tracking state and confidence, hand count, gesture and phase, control mode and state, pointer flags, device state and per-capability availability, the last few action labels, render FPS, current errors). No frame, no image, no audio, no file path and nothing about other applications.
-  * **Closed action allowlist**: `VOLUME_UP/DOWN`, `MUTE`, `PLAY_PAUSE`, `NEXT_TRACK`, `PREVIOUS_TRACK`, `BRIGHTNESS_UP/DOWN`, `MINIMIZE`, `MAXIMIZE`, `NEXT_WINDOW`, `PAUSE_CONTROL`, `RESUME_CONTROL`, `DISABLE_CONTROL` and the `MOUSE` / `DEVICE` mode change. Anything else - including shell commands, shutdowns, restarts, logouts, file operations and system settings - is answered with "That action isn't available through VisionCore AI." and is not representable in the system at all.
-  * **Every AI action passes the full gate chain**: strict JSON schema, allowlist, mode check, control-enabled check, emergency check, platform capability check, then the existing controller through the existing priority ordered intent router. An emergency stop, a disabled layer or a missing capability refuses the request, and the reply says so.
-  * **Two-step confirmation** for disruptive requests (`MINIMIZE`, `MAXIMIZE`, `NEXT_WINDOW`, `DISABLE_CONTROL`) with a `CONFIRM` / `CANCEL` strip; harmless questions never ask.
-  * **Honest status only**: `READY`, `PROCESSING` (a request really is with the provider), `RESPONDING`, `EXECUTING`, `ERROR` and `NOT CONFIGURED`. Nothing fakes thinking, no answer is fabricated, and a failure keeps the provider's own reason (`AI PROVIDER TIMEOUT`, `AI PROVIDER RATE LIMIT`, `AI PROVIDER AUTH FAILED`, `AI PROVIDER UNAVAILABLE`, `AI RESPONSE UNREADABLE`).
-  * **Never blocks the pipeline**: provider calls run on one background daemon thread, the render loop only drains a queue, and a request in flight costs the camera and gesture pipeline nothing.
-* **Voice Input** (Phase 8, optional, off by default, local only):
-  * **Explicit activation only**: press `V` (or click `[TALK]`/`[MIC]` in the assistant panel) to open one bounded listening window; `V` again cancels it immediately. The microphone is `OFF` at launch, never opens because a hand appeared, the panel opened, the camera started or the application launched, and it reports `VOICE UNAVAILABLE` honestly when no local engine or device exists.
-  * **Same assistant, same gates**: a transcript becomes an ordinary user message (`YOU - VOICE "..."`), so a spoken request travels the identical allowlist -> safety gate -> existing controller chain as a typed one. There is no second router, no second confirmation system and no voice-specific way to reach the operating system.
-  * **Privacy by construction**: the recogniser is a local, replaceable `SpeechRecognizer` (vosk or the `SpeechRecognition` package); audio is never written to disk, never sent anywhere, and the AI provider receives only the transcribed text plus the same constructed state block a typed message carries.
-  * **Cancellable and stale-safe**: cancelling stops the capture at once, clears the pending text and closes the microphone; a late, malformed or superseded result is discarded by request id and can never execute. Silence ends in `LISTENING TIMEOUT` with `MIC OFF` and the microphone is re-activatable.
-  * **Never blocks a frame**: capture, transcription and the watchdog live on one background worker thread; the measured cost of the voice layer is ~0.002 ms per frame and the loop rate does not drop while listening (24.6 fps listening against 24.9 fps idle, measured at 1280x800 on the validation host).
-* **Resilient Error Recovery**:
-  * Automatic detection of camera absence, permission rejections, and hardware locks.
-  * Polished user-facing recovery screen with interactive `[ RETRY CAMERA ]` and `[ EXIT SYSTEM ]` controls.
-  * Keyboard accelerators (`C` to enable/pause mouse control, `M`/`D` for `MOUSE`/`DEVICE` mode, `P` to show/hide the performance readout, `R` to retry the camera, `F11` for fullscreen, `ESC` to quit).
-* **Mouse Control Pipeline**:
-  * `CAMERA -> HAND TRACKING -> LANDMARKS -> GESTURE ENGINE -> MOUSE CONTROLLER -> OS CURSOR`.
-  * The gesture engine never touches an operating system API: it produces results, and a separate control layer (`app/controls/`) decides whether acting on them is safe.
-  * Gesture mappings:
+## How It Works
 
-    | Gesture | Action |
-    | --- | --- |
-    | `POINT` | engage the pointer and move the cursor with the index fingertip |
-    | `POINT` + `PINCH` | one left click per pinch cycle |
-    | `POINT` + `PINCH` held | drag, released when the pinch ends or trust is lost |
-    | `TWO_FINGER` + vertical movement | scroll up / down |
-    | `OPEN_PALM` (held ~0.8 s) | emergency stop: disable control and release everything |
+1. `main.py` verifies Python and required dependencies, then loads validated configuration.
+2. The application creates the window and begins the boot screen.
+3. The camera is opened and its first frame is checked asynchronously.
+4. If enabled, the MediaPipe tracker starts on its own worker thread.
+5. The gesture engine converts tracked landmarks into stable gesture results without calling operating-system APIs.
+6. The mouse or device controller applies mode, capability, confidence, pause, and emergency-stop gates before acting.
+7. The HUD renders measured subsystem state, tracking data, gestures, controls, errors, and action feedback.
+8. The AI panel and voice input are deliberate input methods. Voice transcripts become ordinary assistant messages and use the same parser, allowlist, and safety path as typed messages.
+9. Shutdown releases control first, then device resources, tracking, camera, gesture state, and the window.
 
-  * `SWIPE_LEFT` and `SWIPE_RIGHT` perform no action in `MOUSE` mode; in `DEVICE` mode they skip tracks.
-  * Cursor mapping is resolution independent: the desktop geometry is read from the platform at runtime and the control region is a configurable fraction of the camera frame, so the same proportional desktop area is reachable on any screen, camera and video resolution.
-  * Cursor smoothing is a separate layer from landmark smoothing, with its own time constant, speed gain and deadzone - the operating system is only called when the cursor actually needs to move.
-  * Control states are always visible: `DISABLED`, `ARMED`, `ACTIVE`, `PAUSED`, `EMERGENCY_STOP`, with live indicators for `POINTER ACTIVE`, `DRAGGING`, `SCROLLING` and the measured pointer position.
-  * No mouse button can ever stay pressed: hand loss, low confidence, tracking loss, pause, emergency stop, backend failure and application exit all release the button and end any drag.
-* **Device Control Pipeline**:
-  * `CAMERA -> HAND TRACKING -> LANDMARKS -> GESTURE ENGINE -> DEVICE CONTROLLER -> OS DEVICE APIS`.
-  * A separate layer (`app/controls/device.py`) that consumes gesture results and never recognises anything, so the gesture engine stays platform independent and the classifier never contains an operating system call.
-  * Every action passes the same fixed chain: control mode -> device control enabled -> safety gate (hand present, confidence above threshold) -> stable gesture -> cooldown/debounce -> platform capability -> action. Any failure means no action.
-  * Gesture mappings in `DEVICE` mode:
+## Architecture
 
-    | Gesture | Action |
-    | --- | --- |
-    | `TWO_FINGER` + vertical movement | volume up (up) / volume down (down), continuous with a deadzone and a rate limit |
-    | `PINCH` | toggle mute, once per pinch cycle |
-    | `OPEN_PALM` (brief) | play / pause, once per gesture cycle |
-    | `OPEN_PALM` (held ~1.8 s) | emergency stop: stop every layer and cancel pending actions |
-    | `SWIPE_RIGHT` | next track, once per swipe |
-    | `SWIPE_LEFT` | previous track, once per swipe |
-    | `FIST` + vertical movement | brightness up / down, only where the platform exposes a writable backlight |
+The production code is organized into small layers:
 
-  * Window actions (`MIN`, `MAX`, `SWITCH`) and the allowlisted launcher (`BROWSER`, `CALC`, `FILES`) are deliberate interface buttons, so they are always an explicit user action, never a gesture.
-  * Continuous controls are travel driven: the vertical movement of the palm anchor (wrist and middle knuckle) is accumulated, so a slow deliberate movement acts while tremor never crosses the deadzone. Detecting a pose alone never changes anything.
-  * Every action is reported as a typed result (success, action, message, timestamp, capability) and shown as a short lived notification in the `DEVICE CONTROL` panel, never as per-frame output.
-* **Platform Device Backends**:
-  * `Linux` — volume and mute through `wpctl`, `pactl` or `amixer` when one is present (falling back to `XF86` audio keys with relative steps and an honest "level not reportable" readout), brightness through a writable `/sys/class/backlight` device, media through `XF86` media keys, and window actions through EWMH over the shared X11 session. No audio tool, no backlight and no X session are each reported as their own `UNAVAILABLE` reason.
-  * `Windows` — volume and mute through the documented `IAudioEndpointVolume` COM interface, media through virtual key codes, window actions through `ShowWindow` and `Alt+Tab`, and the launcher through resolved executables. Brightness is reported `UNAVAILABLE` because no documented, dependency-free API exists for it.
-  * `Unsupported` — an explicit no-op backend: the interface reports that device control is unavailable and states why.
-  * No new dependency: `ctypes`, the standard library and the tools already on the system only. No shell, no command interpreter, no network device control.
-* **Platform Mouse Backends**:
-  * `Windows` — absolute cursor positioning and wheel notches through `user32` `SendInput`, including per-monitor DPI awareness.
-  * `Linux` — pointer warping through `libX11` and synthetic button/wheel events through the XTEST extension. A Wayland session without an X server is reported as unsupported instead of half working.
-  * `Unsupported` — an explicit no-op backend: the interface reports that control is unavailable and explains why instead of silently failing.
-  * No new dependency: the backends use the standard library `ctypes` only.
-* **Local Gesture Engine**: Pure-Python geometry over the tracking output - a few hundred floating point operations per hand per frame, no second neural network, no added latency, no image processing.
-* **Local Mouse Controller**: The control pass costs well under a millisecond per frame and issues no operating system call unless the cursor or a button state actually changes.
-* **System Diagnostics**: Built-in CLI telemetry inspection (`--diagnostics`) reporting OS, Python version, display server, OpenCV backend, and camera capabilities.
-* **Zero Cloud Dependency**: 100% offline, local-first processing. Hand landmarks are computed locally from in-memory frames that are never written to disk, uploaded, recorded or transmitted. No model download, no account and no API key are required.
+- `main.py` — canonical entry point, CLI parsing, Python/dependency checks.
+- `version.py` — single source of truth for the release identity.
+- `app/application.py` — lifecycle coordinator, frame loop, subsystem synchronization, and shutdown ordering.
+- `app/camera.py` — physical and synthetic camera sources, asynchronous capture, frame lifecycle.
+- `app/hand_tracking.py` — lazy MediaPipe initialization, tracking worker, landmarks, smoothing, and tracking state.
+- `app/gestures/` — normalized landmark features, pose classification, temporal stabilization, swipe detection, and gesture snapshots.
+- `app/controls/` — mouse and device controllers, platform backends, safety gates, capability reporting, and the fixed application launcher allowlist.
+- `app/interaction/` — intent routing, interaction state, action feedback, and input provenance.
+- `app/ai/` — environment configuration, sanitized context, provider transport, strict response parsing, allowlist, and background worker.
+- `app/voice/` — optional local speech engine selection, bounded capture, cancellation, stale-result protection, and voice state.
+- `ui/` — boot, camera, HUD, gesture, tracking, AI, feedback, and shutdown rendering.
+- `utils/` — platform information and dependency/camera diagnostics.
 
----
+The gesture engine does not control the operating system. AI and voice do not call control backends directly. All actions end in the existing typed controllers and safety gates.
 
 ## Requirements
 
-* **Python 3.10 – 3.12** (the MediaPipe hand landmark package used for local tracking publishes wheels for CPython 3.9–3.12)
-* Standard USB webcam or integrated camera (camera index 0)
-* Operating System:
-  * Linux (X11 / Wayland / Headless)
-  * Windows 10 / 11
-  * macOS (12 Monterey or newer)
+### Python
 
-### Dependencies
+- Python 3.10 or newer.
+- MediaPipe wheel availability depends on the Python interpreter and operating system. The declared range is kept below `0.10.22` because this application uses the bundled `solutions` hand graph.
 
-`requirements.txt` pins only what the application genuinely uses:
+### Operating system and desktop
+
+The application window is intended for Linux, Windows, and macOS. Actual control support depends on the host:
+
+- Linux mouse control requires an X11 display and XTEST support. A Wayland-only session without XWayland is reported as unavailable.
+- Windows mouse and window controls use native Windows APIs.
+- Device capabilities are probed individually. Audio tools, a writable backlight device, an X11 window manager, and allowlisted applications may or may not exist.
+- macOS can run the application window and local vision pipeline, but the current mouse/device backends report unsupported capabilities rather than pretending to work.
+- A working camera is required for live tracking. `--mock-camera` provides a clearly marked synthetic source for rendering and lifecycle validation.
+
+### Required Python packages
+
+`requirements.txt` contains the required runtime packages:
 
 | Package | Purpose |
 | --- | --- |
-| `opencv-python-headless` | Camera capture, frame colour conversion and resize |
-| `numpy` | Frame buffers and the landmark vector maths (`<2` for the MediaPipe runtime) |
-| `pygame` | Desktop window, HUD rendering and input |
-| `mediapipe` | On-device hand landmark tracking engine (`0.10.14 – 0.10.21`, models bundled in the package) |
+| `opencv-python-headless` | Camera capture, conversion, and resizing |
+| `numpy` | Frame buffers and landmark mathematics |
+| `pygame` | Desktop window, HUD rendering, and input events |
+| `mediapipe` | On-device hand landmark inference |
 
-Gesture recognition adds **no new dependency**: it is implemented with the standard library over the landmarks the tracking engine already produces.
-
----
+AI provider transport uses Python's standard library. Voice engines and microphone bindings are optional and are not required to start the application.
 
 ## Installation
 
-### 1. Clone the repository
+### Linux and macOS
 
 ```bash
 git clone https://github.com/cybervault-Hacky/vision-core.git
 cd vision-core
-```
-
-### 2. Create and activate a virtual environment
-
-**Linux & macOS:**
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 main.py
 ```
 
-**Windows (Command Prompt):**
-```cmd
-python -m venv .venv
-.venv\Scripts\activate.bat
-```
+### Windows
 
-**Windows (PowerShell):**
 ```powershell
-python -m venv .venv
+git clone https://github.com/cybervault-Hacky/vision-core.git
+cd vision-core
+py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python main.py
 ```
 
-### 3. Install dependencies
+The application itself is always launched through `main.py`; no local server or second process is required.
+
+### Headless Linux and OpenCV
+
+MediaPipe declares `opencv-contrib-python` as a transitive dependency. On a Linux host without `libGL.so.1`, that GUI build can make the otherwise headless OpenCV import fail. VisionCore reports this clearly. Restore the declared headless OpenCV build with:
 
 ```bash
-pip install -r requirements.txt
+python3 -m pip install --force-reinstall --no-deps 'opencv-python-headless>=4.8.0,<4.12'
 ```
 
-> **OpenCV build note** — MediaPipe declares `opencv-contrib-python` (the GUI build), so pip installs it next to the headless build and both provide the same `cv2` module. On Windows, macOS and desktop Linux this is harmless. Only on a headless Linux host without `libGL`, restore the headless build:
-> ```bash
-> pip install --force-reinstall --no-deps opencv-python-headless
-> ```
-> `python3 main.py` detects this case and prints the exact command to run.
+A headless machine also needs a display strategy for Pygame. For validation only, a dummy SDL display can be used:
 
----
+```bash
+SDL_VIDEODRIVER=dummy python3 main.py --mock-camera
+```
 
-## Running VisionCore
+This does not provide physical camera or hand input and is not a hardware validation claim.
 
-To launch the futuristic vision interface:
+## Running
+
+The canonical command is:
 
 ```bash
 python3 main.py
 ```
 
-### Additional Command-Line Options
+VisionCore starts with:
 
-```bash
-# Display system diagnostics and camera probe telemetry
-python3 main.py --diagnostics
-
-# Run with a specific camera device index
-python3 main.py --camera-index 1
-
-# Track two hands instead of one (max 4)
-python3 main.py --max-hands 2
-
-# Run the camera HUD without the hand tracking pipeline
-python3 main.py --no-tracking
-
-# Launch with synthetic camera calibration stream (for headless or development)
-python3 main.py --mock-camera
-
-# Enable verbose debug logging (console only; nothing is written to disk)
-python3 main.py --debug
-
-# Optionally mirror the log into a file of your choosing
-VISIONCORE_LOG_FILE=visioncore.log python3 main.py --debug
+```text
+INITIALIZING
+    ↓
+SUBSYSTEM CHECK
+    ↓
+CAMERA
+    ↓
+TRACKING
+    ↓
+VISIONCORE READY
 ```
 
-### Keyboard Controls
+The camera and tracking results are asynchronous and real. If either is unavailable, the boot screen and HUD show the unavailable state and provide the appropriate recovery or limitation message.
+
+## Command-Line Options
+
+```text
+python3 main.py --help
+```
+
+Available options:
+
+| Option | Purpose |
+| --- | --- |
+| `--help` | Show command-line help and exit. |
+| `--version` | Print `VisionCore v1.0.0` and exit without importing desktop dependencies. |
+| `--diagnostics` | Print platform, Python, library, display, and camera diagnostics, then exit. |
+| `--camera-index N` | Use camera device index `N` instead of the default index `0`. |
+| `--mock-camera` | Use the synthetic calibration source instead of physical camera hardware. |
+| `--max-hands N` | Track between 1 and 4 hands; the default is 1. |
+| `--no-tracking` | Run the camera HUD without starting the hand-tracking pipeline. |
+| `--debug` | Enable verbose console logging. |
+
+`VISIONCORE_LOG_FILE=/path/to/file.log python3 main.py --debug` can be used when a user explicitly wants a log file. Runtime logs are not written by default.
+
+## Controls
 
 | Key | Action |
 | --- | --- |
-| `ESC` | Shut down VisionCore |
-| `C` | Enable, pause or resume mouse control |
-| `M` | Switch to `MOUSE` control mode |
-| `D` | Switch to `DEVICE` control mode |
-| `F11` | Toggle fullscreen |
-| `R` | Reconnect the camera from the recovery screen |
-| `A` | Open or close the `VISIONCORE AI` panel (while the panel is open every key types into it, and `A` closes it only when the input is empty) |
-| `V` | Open the microphone for one listening window, or cancel the running one (`MICROPHONE OFF` by default; refused honestly while an emergency stop is active) |
+| `ESC` | Request shutdown. Control is released before resources are closed. |
+| `C` | Enable, pause, or resume mouse control. |
+| `M` | Select `MOUSE` mode. |
+| `D` | Select `DEVICE` mode. |
+| `A` | Open or close the VisionCore AI panel. |
+| `V` | Start one bounded voice listening window, or cancel the active one. |
+| `P` | Show or hide performance diagnostics. |
+| `R` | Retry the camera from the recovery screen. |
+| `F11` | Toggle fullscreen. |
 
----
+Mouse and device control always start disabled. A deliberate interface action is required before either control layer can act.
 
-## Camera Permissions
+## Gesture Controls
 
-When launching VisionCore for the first time, your operating system may prompt you to authorize camera access:
+The gesture engine recognizes these existing gestures:
 
-* **macOS**: Go to `System Settings` → `Privacy & Security` → `Camera` and verify that `Terminal` (or your Python IDE) is toggled ON.
-* **Windows**: Go to `Settings` → `Privacy & Security` → `Camera`, toggle `Camera access` ON, and ensure `Let desktop apps access your camera` is enabled.
-* **Linux**: Ensure your current user belongs to the `video` group:
-  ```bash
-  sudo usermod -aG video $USER
-  ```
-  *(Log out and back in for group changes to take effect).*
+| Gesture | Meaning | Notes |
+| --- | --- | --- |
+| `POINT` | Index-finger pointing | Engages mouse pointer movement in `MOUSE` mode. |
+| `PINCH` | Thumb and index pinch | Clicks or starts a drag in `MOUSE` mode; toggles mute once per cycle in `DEVICE` mode. |
+| `TWO_FINGER` | Index and middle fingers extended | Movement scrolls in `MOUSE` mode; vertical movement controls volume in `DEVICE` mode. |
+| `OPEN_PALM` | Open hand | A deliberate hold triggers the emergency stop. In `DEVICE` mode, a brief cycle can play/pause before the longer stop threshold. |
+| `FIST` | Closed hand | No mouse action; vertical movement controls brightness only when the device exposes a writable brightness capability. |
+| `SWIPE_LEFT` | Leftward temporal motion | Previous track in `DEVICE` mode; no mouse action. |
+| `SWIPE_RIGHT` | Rightward temporal motion | Next track in `DEVICE` mode; no mouse action. |
+| `NONE` | No stable recognized pose | Neutral state; it cannot trigger a control action. |
 
----
+A hand must remain sufficiently visible and confident for the relevant controller to act. Hand loss, low confidence, pause, mode changes, and emergency stop release active interactions.
+
+## Mouse Mode
+
+Mouse control is opt-in and requires a working platform mouse backend.
+
+| Gesture | Mouse action |
+| --- | --- |
+| `POINT` | Move the cursor with the index fingertip inside the configured control region. |
+| `POINT` followed by `PINCH` | One left click per pinch cycle. |
+| Held `PINCH` | Start a drag after the configured hold interval. Release ends the drag. |
+| `TWO_FINGER` plus vertical movement | Scroll after the configured deadzone is crossed. A stationary hand does not scroll. |
+| Held `OPEN_PALM` | Emergency stop; active pointer state and held buttons are released. |
+
+Control starts `DISABLED`, not merely idle. The pointer does not move until the user enables it. Mouse buttons are released on pinch release, hand loss, pause, emergency stop, backend failure, and shutdown.
+
+## Device Mode
+
+`DEVICE` mode is a separate control layer. It is enabled only when the device backend reports a capability and the layer is explicitly armed.
+
+| Gesture or action | Device behavior |
+| --- | --- |
+| `TWO_FINGER` plus vertical movement | Rate-limited volume adjustment when volume is available. |
+| `PINCH` | One mute toggle per pinch cycle when mute is available. |
+| Brief `OPEN_PALM` | Play/pause when media control is available. |
+| `SWIPE_RIGHT` / `SWIPE_LEFT` | Next/previous track when media control is available. |
+| `FIST` plus vertical movement | Brightness adjustment only with a writable backlight capability. |
+| Held `OPEN_PALM` | Emergency stop for device and mouse control. |
+| Device panel buttons | Explicit window actions and allowlisted application launcher entries when supported. |
+
+The HUD shows each capability as `READY` or `UNAVAILABLE` with the platform-provided reason. No device action is run in `MOUSE` mode, and no unsupported action reports success.
+
+## AI Assistant
+
+The AI assistant is optional and is not needed for camera, gestures, mouse, or device control. Press `A` or select the AI panel to activate the interface. A request is sent only after the user submits text.
+
+### Configuration
+
+```bash
+export VISIONCORE_AI_PROVIDER=openai
+export VISIONCORE_AI_API_KEY=YOUR_API_KEY
+export VISIONCORE_AI_MODEL=gpt-4o-mini
+
+# Optional OpenAI-compatible endpoint and limits:
+export VISIONCORE_AI_BASE_URL=https://api.openai.com/v1
+export VISIONCORE_AI_TIMEOUT_SEC=20
+export VISIONCORE_AI_MAX_TOKENS=400
+export VISIONCORE_AI_TEMPERATURE=0.2
+python3 main.py
+```
+
+Supported provider values are `openai`, `openai_compatible`, or `none`. An unknown provider, empty key, invalid URL scheme, or missing model/provider configuration leaves AI unconfigured. The API key is read from the environment only and is not written to `config.json`, logs, UI, or the repository.
+
+### Safety model
+
+AI output is never executed as code. The path is:
+
+```text
+provider response
+  → strict JSON parsing
+  → typed schema
+  → closed action allowlist
+  → mode and control gates
+  → emergency-stop gate
+  → platform capability gate
+  → existing intent router and controller
+```
+
+Unknown actions, malformed responses, provider failures, cancelled requests, stale responses, shell requests, file requests, power requests, and other system changes are refused. Disruptive allowlisted actions require confirmation. AI cannot enable control, bypass emergency stop, access arbitrary files, run commands, or operate on raw camera or microphone data.
+
+With no provider configured, deterministic questions about VisionCore's current state can still receive local answers. These replies are labeled `LOCAL` and are not represented as model output.
+
+## Voice
+
+Voice is optional, local-only, explicitly activated, and off by default. Press `V` or use the microphone button in the AI panel to open one bounded listening window. Press `V` again to cancel it.
+
+Supported settings:
+
+```bash
+export VISIONCORE_SPEECH_PROVIDER=auto   # auto | vosk | sphinx | none
+export VISIONCORE_SPEECH_MODEL=/path/to/local/vosk-model
+export VISIONCORE_SPEECH_DEVICE=2        # optional input device index
+export VISIONCORE_SPEECH_TIMEOUT_SEC=8
+export VISIONCORE_SPEECH_PHRASE_LIMIT_SEC=15
+export VISIONCORE_SPEECH_SAMPLE_RATE=16000
+```
+
+`auto` selects an installed local Vosk model or offline PocketSphinx. No speech package is required for normal startup. If no local engine or microphone is usable, the HUD reports `VOICE UNAVAILABLE` and the rest of VisionCore remains usable.
+
+A voice session is bounded, cancellable, and closed on timeout, emergency stop, or shutdown. A transcript is passed to the same AI assistant pipeline as typed text. Raw microphone samples are not saved or sent to an AI provider. VisionCore has no wake word, always-on microphone, or text-to-speech layer.
+
+## Safety
+
+Safety is implemented in the control layers rather than being a UI promise:
+
+- Mouse and device layers start disabled.
+- Mode arbitration prevents mouse and device layers from acting on the same gesture.
+- Tracking presence, confidence, gesture stability, deadzones, cooldowns, and platform capabilities are checked before actions.
+- `OPEN_PALM` held for the configured emergency interval triggers an authoritative stop.
+- Emergency stop releases held mouse buttons, cancels continuous device actions, cancels pending AI confirmations, and closes active voice capture.
+- A stale AI response or voice transcript cannot execute after cancellation or shutdown.
+- Camera loss, hand loss, low confidence, pause, backend failure, and application shutdown release active control.
+- Shutdown is idempotent and performs cleanup before displaying the shutdown animation.
+
+## Privacy
+
+VisionCore is local-first:
+
+- Camera frames are processed from memory and are not recorded or uploaded.
+- Raw microphone audio is captured only during an explicit local listening window, is not persisted, and is never sent to a speech cloud service.
+- Conversations, recent actions, and feedback are held in memory and discarded on exit.
+- No telemetry, analytics, tracking beacons, crash-reporting service, or background network activity is included.
+- The optional AI provider is contacted only after the user submits a request. It receives the conversation and a deliberately constructed state block containing HUD-visible status, control state, capability state, and recent action labels.
+- AI requests do not include camera frames, images, raw audio, filesystem paths, unrelated application data, passwords, or API keys.
+
+## Hardware Support
+
+Capability classification for this release:
+
+| Classification | Meaning |
+| --- | --- |
+| **Implemented** | The source contains the camera, local tracking, gesture, safety, mouse, device, AI, and voice paths described here. |
+| **Simulated / injected** | `--mock-camera` supplies a synthetic calibration frame stream for headless lifecycle and rendering checks. It does not synthesize hand input and does not prove hardware support. |
+| **Hardware validated** | Only physical hardware tested on the actual target host qualifies. The release audit environment did not contain a physical camera, microphone, X11 mouse session, or Windows device APIs, so no claim is made for those items here. |
+| **Unavailable** | A missing device, permission, display server, optional package, or operating-system capability is reported individually by the application. |
+
+Live tracking requires a camera, a working MediaPipe installation, and suitable lighting. Mouse and device behavior is intentionally platform-dependent; unavailable backends are safer than unsupported emulation.
 
 ## Troubleshooting
 
-### Camera Hardware Unavailable
-* **Symptom**: VisionCore displays the `CAMERA HARDWARE UNAVAILABLE` recovery screen after the boot sequence.
-* **Fix**:
-  1. Confirm your webcam is securely plugged into an active USB port.
-  2. Check if another program (Zoom, Google Meet, OBS, Discord) is currently using the camera. Close conflicting programs and press `[R]` or click `[ RETRY CAMERA ]`.
-  3. If your device has multiple cameras (e.g. laptop webcam + external USB webcam), specify the camera index:
-     ```bash
-     python3 main.py --camera-index 1
-     ```
+### Camera unavailable
 
-### Permission Denied
-* **Symptom**: Logs indicate permission denied or V4L2 device open error.
-* **Fix**: Follow the platform-specific instructions in [Camera Permissions](#camera-permissions).
+The boot screen and recovery view report the camera index and failure reason. Check that:
 
-### `libGL.so.1: cannot open shared object file`
-* **Symptom**: `python3 main.py` reports that OpenCV is unusable and mentions `libGL`.
-* **Fix**: install the system OpenGL library (`sudo apt install -y libgl1`), or restore the headless OpenCV build:
-  ```bash
-  pip install --force-reinstall --no-deps opencv-python-headless
-  ```
+1. The camera is connected and not locked by another application.
+2. Operating-system camera permissions allow Python or the terminal to use it.
+3. The selected index is correct; try `python3 main.py --camera-index 1`.
+4. The camera returns frames, not only an open device handle.
+5. You are not using `--mock-camera` when you need physical camera input.
 
-### Mouse Control Unavailable
-* **Symptom**: `[ ENABLE ]` reports `UNAVAILABLE`, or the control module shows `NO X DISPLAY SERVER` / `PERMISSION REQUIRED`.
-* **Fix**:
-  1. Confirm which backend was detected in the log line `Mouse control backend '...' ready|unavailable: ...`. The short reason is also shown in the `MOUSE CONTROL` module.
-  2. **Linux**: pointer and click control needs an X server (`DISPLAY` set) plus `libX11` and the XTEST extension from `libXtst`. On a pure Wayland session without XWayland this phase has no implementation and says so; running under XWayland works. Install the runtime libraries if `LIBX11 NOT INSTALLED` or `XTEST EXTENSION MISSING` is reported (`libx11-6`, `libxtst6` on Debian/Ubuntu).
-  3. **Windows**: the backend needs no special permission for `SendInput` in a normal desktop session. If it is blocked (`UNAVAILABLE`), check that the application is not running under a stricter integrity level or a locked-down policy; VisionCore never attempts to bypass operating system security.
-  4. **macOS and everything else**: not implemented. The interface reports the platform as unsupported rather than pretending.
+Press `R` or select `RETRY CAMERA` from the recovery view after correcting the issue.
 
-### Device Control Unavailable
+### MediaPipe or OpenCV unavailable
 
-The `DEVICE CONTROL` panel always states which capability is missing, so nothing has to be guessed:
-
-* `VOLUME UNAVAILABLE` — no audio control tool was found (`wpctl`, `pactl` or `amixer` on Linux) and no X session was available for audio keys.
-* `MEDIA UNAVAILABLE` — media keys need an X session on Linux.
-* `BRIGHTNESS UNAVAILABLE` — no writable `/sys/class/backlight` device on Linux, or the platform has no documented brightness control (Windows). Brightness control is never faked.
-* `WINDOW UNAVAILABLE` — window actions need an X session with EWMH on Linux, or the Windows APIs could not be loaded.
-* `LAUNCHER UNAVAILABLE` — none of the allowlisted applications (`browser`, `calculator`, `files`) resolved to a real executable on this system.
-* Device control also requires `DEVICE` mode and an explicit enable (`[ ENABLE ]` or `[C]` for the mouse layer); until then the interface shows `DISABLED` and performs nothing.
-
-### Gesture Not Recognised
-* **Symptom**: The `GESTURE ENGINE` panel stays on `SEARCHING` or `ANALYZING` while a hand is tracked.
-* **Fix**:
-  1. Hold the pose steady for a moment - a gesture must agree for `gesture_stability_frames` consecutive frames (`3` by default) before it is reported. Holding an unambiguous pose is what moves the panel from `ANALYZING` to a gesture name.
-  2. Keep the hand at a comfortable distance and angle to the camera; gesture geometry is scale and rotation independent, but a hand seen exactly edge-on (fingers pointing straight at the lens) collapses the 2D landmark projection and is deliberately reported as `NONE` rather than guessed.
-  3. Swipes need a deliberate flick: roughly 18% of the frame width inside 0.4 s, mostly horizontal, with the hand settling before the next swipe can fire. Increase or decrease `swipe_distance_threshold` / `swipe_velocity_threshold` to taste.
-  4. Raise or lower sensitivity with `gesture_confidence_threshold` in `config.json` (higher = stricter).
-* **Note**: `NONE` is a first-class result. An ambiguous hand reports `NONE` on purpose so that no future control action could fire by accident.
-
-### Hand Tracking Not Detecting
-* **Symptom**: The HUD stays in `TRACKING: SEARCHING` or the `HAND TRACKING` panel reports `UNAVAILABLE`.
-* **Fix**:
-  1. Ensure your hand is well lit and fully visible in the frame — avoid strong backlighting.
-  2. If the boot log reports a MediaPipe initialisation failure, reinstall dependencies (`pip install -r requirements.txt`).
-  3. On low-powered machines, keep the default lite model (`tracking_model_complexity` `0`) and the 640 px inference width.
-
-### Gesture Configuration
-
-Gesture recognition is tuned through `config.json` (all values are validated and clamped on load):
-
-```json
-{
-  "gesture_enabled": true,
-  "gesture_confidence_threshold": 0.62,
-  "gesture_stability_frames": 3,
-  "gesture_release_frames": 2,
-  "pinch_threshold": 0.72,
-  "pinch_release_threshold": 0.85,
-  "pinch_lift_threshold": 1.25,
-  "swipe_distance_threshold": 0.18,
-  "swipe_velocity_threshold": 0.60,
-  "swipe_cooldown": 0.70,
-  "swipe_window_sec": 0.40
-}
-```
-
-`pinch_threshold` is a ratio (thumb-to-index tip separation divided by palm scale), not a pixel count, so it does not change when the hand moves closer to or further from the camera.
-
-### Mouse Control Configuration
-
-Mouse control is tuned separately from gesture recognition (values are validated and clamped on load):
-
-```json
-{
-  "mouse_control_enabled": true,
-  "cursor_smoothing": 0.55,
-  "cursor_speed": 1.0,
-  "cursor_deadzone": 0.006,
-  "control_region_margin": 0.15,
-  "click_cooldown": 0.45,
-  "drag_hold_sec": 0.30,
-  "scroll_sensitivity": 8.0,
-  "scroll_deadzone": 0.015,
-  "safety_confidence_threshold": 0.45,
-  "emergency_stop_sec": 0.80
-}
-```
-
-* `control_region_margin` insets the active area: `0.15` means the outer 15% of the camera frame is ignored, so the cursor is not lost at the edges of the picture. This is the calibration knob of this phase.
-* `cursor_smoothing` sets the smoothing time constant (`0` = raw, `0.95` = heavy). `cursor_speed` scales the pointer gain and `cursor_deadzone` rejects sub-pixel tremor.
-* `mouse_control_enabled` set to `false` removes the feature entirely: the control module then reports `DISABLED IN CONFIGURATION` and `[ ENABLE ]` cannot arm it.
-
-### Device Control Configuration
-
-Device control is tuned separately and validated on load (values are clamped to safe ranges):
-
-```json
-{
-  "device_control_enabled": true,
-  "volume_sensitivity": 55.0,
-  "volume_deadzone": 0.010,
-  "volume_max_step": 8.0,
-  "volume_interval_sec": 0.07,
-  "brightness_sensitivity": 60.0,
-  "brightness_deadzone": 0.010,
-  "brightness_max_step": 10.0,
-  "device_action_cooldown": 0.80,
-  "device_emergency_stop_sec": 1.80,
-  "device_pinch_mutes": true
-}
-```
-
-* `device_control_enabled` set to `false` removes the feature entirely: the module reports `DISABLED IN CONFIGURATION` and `[ ENABLE ]` cannot arm it.
-* `volume_sensitivity` and `brightness_sensitivity` convert normalised hand travel into percent per action; `*_max_step` caps a single action so a fast gesture cannot jump the level, and `*_deadzone` is the total travel required before the first action.
-* `volume_interval_sec` is the minimum gap between two continuous actions, so one frame can never emit a burst of volume changes.
-* `device_action_cooldown` is the minimum gap between two event actions (mute, play/pause, track skip), so a still gesture or a repeated swipe result cannot retrigger.
-* `device_emergency_stop_sec` is how long `OPEN_PALM` must be held before the emergency stop, deliberately longer than the mouse layer's `0.80 s`: a brief palm is play/pause, a deliberate hold stops everything.
-* Background volume tools are selected in a fixed preference order and only ever run as `argv` lists without a shell.
-
-### VisionCore AI Configuration
-
-The assistant is optional. With nothing configured, VisionCore reports `AI / NOT CONFIGURED` in the panel and keeps answering state questions locally; everything else in the application is unaffected.
+Install the declared dependencies inside the active virtual environment:
 
 ```bash
-# OpenAI or any OpenAI-compatible chat completions endpoint
-export VISIONCORE_AI_PROVIDER=openai          # openai | openai_compatible | none
-export VISIONCORE_AI_API_KEY=your-key-here    # never committed, never written to disk
-export VISIONCORE_AI_MODEL=gpt-4o-mini
-export VISIONCORE_AI_BASE_URL=https://api.openai.com/v1   # optional
-export VISIONCORE_AI_TIMEOUT_SEC=20           # optional, clamp 3-120
-python3 main.py
+python3 -m pip install -r requirements.txt
+python3 -m pip check
 ```
 
-* The key is read from the environment only. It is excluded from every object representation, is never logged and is never written to `config.json` - add `VISIONCORE_AI_API_KEY` to your shell profile or your local `.env` (already ignored by git) instead.
-* `VISIONCORE_AI_PROVIDER=none` (or an unknown provider, or a provider without a key) leaves the assistant exactly as it is with no configuration at all.
-* Requests are sent only when you press Enter in the panel. The payload is the conversation plus a small state block (camera, tracking, gesture, control mode and state, device capabilities, the last few action labels, render FPS, current errors). No image, audio, file path or unrelated system information is ever included.
-* Provider failures are reported with their real reason: `AI PROVIDER TIMEOUT`, `AI PROVIDER RATE LIMIT`, `AI PROVIDER AUTH FAILED`, `AI PROVIDER UNAVAILABLE`, `AI RESPONSE UNREADABLE`.
+On headless Linux, follow the OpenCV/libGL remediation in [Headless Linux and OpenCV](#headless-linux-and-opencv). Do not install packages into the system interpreter when it is marked externally managed; use a virtual environment.
 
-### Voice Input Configuration
+### Tracking unavailable
 
-Speech input is optional and **off until you press `V`**. It is a separate abstraction from the AI provider: an engine transcribes locally, and only the resulting text is passed to the assistant (or handled as a local command when no provider is configured).
+Tracking is disabled by `--no-tracking`, cannot initialize if MediaPipe is unusable, or may be unavailable after a camera failure. The HUD reports the actual reason. No gesture control is possible while tracking is unavailable.
 
-```bash
-export VISIONCORE_SPEECH_PROVIDER=vosk        # vosk | sphinx | none (default: auto-detect)
-export VISIONCORE_SPEECH_MODEL=path/to/model  # required by vosk
-export VISIONCORE_SPEECH_TIMEOUT_SEC=8        # listening window, clamp 2-30
-python3 main.py
+### Voice unavailable
+
+Voice needs an optional local engine, its local model where applicable, a microphone, and permission to open the input device. Check `VISIONCORE_SPEECH_PROVIDER`, `VISIONCORE_SPEECH_MODEL`, and `VISIONCORE_SPEECH_DEVICE`. The microphone is intentionally not opened automatically.
+
+### AI not configured or unavailable
+
+AI is optional. Set `VISIONCORE_AI_PROVIDER`, `VISIONCORE_AI_API_KEY`, and `VISIONCORE_AI_MODEL` only when a provider is intended. Missing configuration, an invalid key, timeout, rate limit, malformed response, or unreachable endpoint is shown as an AI error; the camera and local controls continue independently.
+
+### Mouse backend unavailable
+
+- Linux requires `DISPLAY`, an X11 server or XWayland, `libX11`, and XTEST support. A Wayland-only session without XWayland is reported as unsupported.
+- Windows uses `user32` and `SendInput` in a normal desktop session. VisionCore does not bypass permissions or integrity policies.
+- Other platforms keep the application usable but report mouse control as unavailable when no backend exists.
+
+### Device capability unavailable
+
+Volume, media, brightness, window, and launcher availability is probed independently. Linux may need `wpctl`, `pactl`, or `amixer`, a writable `/sys/class/backlight` device, an X11 session, or an installed allowlisted application. Missing capabilities are not approximated.
+
+### Display or fullscreen problems
+
+VisionCore requires a desktop display for its normal HUD. Use `--diagnostics` to inspect the display state. `SDL_VIDEODRIVER=dummy` is suitable only for headless validation and does not provide a visible window.
+
+## Performance
+
+The Phase 9 validation baseline was approximately:
+
+```text
+25.4 FPS at 1280×800
 ```
 
-* No speech package is required to run VisionCore: with none installed the panel reports `MIC UNAVAILABLE / VOICE UNAVAILABLE`, `V` is refused with the real reason, and text, gestures and every other feature keep working.
-* Audio never leaves the machine and is never persisted: the engine owns the device for the length of one listening window, the microphone is closed at the end of it, and nothing is recorded while the state is not `LISTENING`.
-* The assistant panel writes nothing to speech output - Phase 8 adds no text-to-speech layer at all, so no safety or emergency outcome can be spoken, and no reply can claim an action that did not run.
+The 30-minute Phase 9 resource certification recorded:
 
-### Running in Headless / CI Environments
-* If you are running on a server or remote terminal without an attached physical camera, pass `--mock-camera`:
-  ```bash
-  python3 main.py --mock-camera
-  ```
-  This loads the synthetic calibration stream, allowing the full HUD and rendering pipeline to run without physical camera hardware.
+```text
+17,853 iterations
+RSS increase: +1.0 MB
+threads: flat
+worker accumulation: none
+clean shutdown
+```
 
----
+These are measurements from the validation environment, not a performance guarantee for every camera, desktop, interpreter, or operating system.
 
-## Security & Privacy
+## Security
 
-VisionCore is built upon a strict **local-first** security model:
+VisionCore contains no arbitrary shell execution path. The existing subprocess calls are fixed-argument helpers for known platform tools, and the application launcher resolves only a frozen allowlist of applications to absolute executable paths. No shell, command interpreter, `eval`, or `exec` is used for user, gesture, voice, or AI input.
 
-* **No Cloud Processing**: All image processing and camera frame manipulation occurs entirely in system RAM on your local machine.
-* **No Telemetry or Tracking**: The application contains zero analytical beacons, telemetry pings, or usage tracking code.
-* **No Network Calls**: No network sockets or external HTTP requests are made during normal camera streaming.
-* **Gesture Recognition is Local Geometry**: Recognition is pure arithmetic over landmark coordinates already in memory - it cannot transmit anything and it needs no model download, account or API key.
-* **Control is Opt-In and Scoped**: Nothing happens until you explicitly enable control *and* select a mode. `MOUSE` mode sends ordinary pointer and wheel events to the session you are already using; `DEVICE` mode sends ordinary media, volume, brightness and window messages that the desktop already understands. Both stop instantly on hand loss, low confidence, an emergency stop or shutdown.
-* **No Shell, No Commands, No Network Control**: There is no `os.system`, no `shell=True`, no command interpreter and no arbitrary command execution anywhere in the project. The only process this application may start is a fixed, validated `argv` for an application on a frozen allowlist (`browser`, `calculator`, `files`), resolved to an absolute executable path. Hand coordinates and gesture names can never become a command, an argument or a shell string, and no device action is ever taken over a network.
-* **No Automation of Security**: VisionCore never bypasses operating system permissions, never automates authentication, never escalates privileges and never manipulates protected system interfaces - it only sends the ordinary input events and device messages a user could send themselves.
-* **AI is Optional and Off Until You Ask**: the assistant only contacts a provider when you type a message and press Enter. Nothing is streamed - no frames, no audio, no activity and no telemetry - and the state block it sends is built by hand from values already on the HUD.
-* **AI Cannot Execute Anything**: the assistant's action vocabulary is a closed allowlist that ends in the control layers that already existed. There is no `eval`, no `exec`, no `shell=True`, no arbitrary subprocess and no interpretation of model output as code anywhere in `app/ai/`; an answer that does not match the JSON schema is refused as unreadable, and a request for a shutdown, a restart, a logout or a shell command is answered with a fixed refusal and never sent as an action.
-* **No API Key Required**: VisionCore runs fully without any provider configured. If you do configure one, the key is read from the environment only - it is never written to `config.json`, the README, a log line or the repository, and it is excluded from every object representation.
-* **The Microphone is Opt-In, Visible and Local**: the microphone is `OFF` at launch and only opens for the length of one explicitly requested listening window (`V` or the panel button), with the state always shown as `MIC OFF / LISTENING / PROCESSING / READY`. Cancelling stops the capture immediately; a late or superseded transcript is discarded rather than acted on; silence closes the device and reports `LISTENING TIMEOUT`. No audio is recorded, saved or transmitted, and no speech synthesis exists in the project, so nothing VisionCore does can be spoken aloud.
-* **Conversations are Memory Only**: the chat history and the recent-action context exist in RAM for the session and are discarded on exit. No conversation is stored, uploaded or written to disk.
+The AI parser accepts structured data only. The voice path produces a transcript, not a second operating-system command path. Both terminate in the same allowlist, mode, capability, and safety gates used by the rest of the application.
 
----
+Users should still protect their own environment variables and provider credentials. Never commit API keys, tokens, passwords, or local environment files.
 
-## Project Architecture
+## Project Structure
 
 ```text
 vision-core/
-│
-├── main.py                  # Streamlined entry point & CLI parser
-├── requirements.txt         # Core runtime dependencies
-├── README.md                # Documentation & usage guide
-├── LICENSE                  # MIT License
-├── .gitignore               # Git exclusion patterns
-│
 ├── app/
-│   ├── __init__.py          # Package exports
-│   ├── ai/
-│   │   ├── __init__.py      # Assistant package exports
-│   │   ├── assistant.py     # Conversation, status machine & action hand-off
-│   │   ├── client.py        # Background worker: a request never blocks a frame
-│   │   ├── commands.py      # Literal spoken/typed command vocabulary (shared by both)
-│   │   ├── context.py       # Sanitized state block the assistant may see
-│   │   ├── local.py         # Deterministic state answers when offline
-│   │   ├── parser.py        # Strict JSON reply reading (output is data, never code)
-│   │   ├── prompt.py        # System prompt & the response contract
-│   │   ├── provider.py      # Replaceable provider + OpenAI-compatible client
-│   │   ├── router.py        # Closed action allowlist & the route into the safety gates
-│   │   ├── settings.py      # Environment-only configuration (no secret in the repo)
-│   │   └── types.py         # Typed conversation, status, plan & result models
-│   ├── application.py       # Application coordinator & event loop
-│   ├── camera.py            # Hardware capture thread & frame manager
-│   ├── config.py            # AppConfig dataclass & JSON loader/validator
-│   ├── hand_tracking.py     # Hand tracking worker, landmark model & smoothing
-│   ├── interaction/         # Typed interaction states, action feedback & intent router
-│   ├── voice/               # Optional local speech input: engine, controller, settings, types
-│   ├── logger.py            # Clean, formatted console logging
-│   └── state.py             # Lifecycle state machine & telemetry models
-│
-├── app/controls/
-│   ├── __init__.py          # Control layer exports
-│   ├── backend.py           # Windows / Linux X11 / unsupported mouse backends
-│   ├── device.py            # DeviceController: gestures to volume, media, windows, apps
-│   ├── device_backend.py    # Windows / Linux / unsupported device backends
-│   ├── device_types.py      # Device actions, capabilities & tunable device settings
-│   ├── launcher.py          # Frozen allowlist and per-platform application resolution
-│   ├── mouse.py             # MouseController: gestures to pointer, click, drag, scroll
-│   ├── mouse_mapper.py      # Control region, screen mapping and cursor smoothing
-│   ├── safety.py            # Control modes, states, safety gates, tunable settings
-│   └── x11.py               # Shared X11 session: pointer, keys, windows, geometry
-│
-├── app/gestures/
-│   ├── __init__.py          # Gesture engine package exports
-│   ├── types.py             # Gesture, phases, results & tunable settings
-│   ├── features.py          # Landmark geometry: extension, pinch, palm scale
-│   ├── classifier.py        # Static pose scoring, priority & selection
-│   ├── temporal.py          # Bounded motion history & swipe detection
-│   └── engine.py            # Per-hand sessions, stabilisation, transitions
-│
-├── ui/
-│   ├── __init__.py          # UI component exports
-│   ├── ai_panel.py          # VISIONCORE AI panel: conversation, status, confirmation
-│   ├── animations.py        # Reusable easing, rotation, pulse & scanline tweens
-│   ├── boot_screen.py       # 6-step futuristic system boot sequence
-│   ├── camera_view.py       # Letterboxed camera viewport & overlay HUD
-│   ├── gesture_overlay.py   # Gesture effects, motion trail & readout panel
-│   ├── feedback_view.py     # Action notifications, error strip & recent actions
-│   ├── focus_view.py        # Central focus ring, focus readout & quality chip
-│   ├── hand_overlay.py      # Hand landmark visualization & lock-on animation
-│   ├── hud.py               # Top header, subsystem matrix & telemetry panels
-│   ├── shutdown_screen.py   # Shutdown sequence (safety cleanup runs first)
-│   └── window.py            # Desktop window host, button engine & error screens
-│
-├── utils/
-│   ├── __init__.py          # Utility exports
-│   ├── platform.py          # Platform, OS, and permission diagnostics
-│   └── diagnostics.py       # System inspector & ASCII report generator
+│   ├── ai/             # Optional provider-backed assistant and safety routing
+│   ├── controls/       # Mouse/device controllers and platform backends
+│   ├── gestures/       # Landmark geometry and gesture state machine
+│   ├── interaction/    # Intent routing and action feedback
+│   ├── voice/          # Optional local voice input
+│   ├── application.py  # Application coordinator and lifecycle
+│   ├── camera.py       # Camera sources and capture worker
+│   ├── config.py       # Validated local configuration
+│   ├── hand_tracking.py # MediaPipe tracking worker and data model
+│   └── state.py        # Telemetry and lifecycle state
+├── ui/                 # Boot, HUD, camera, panels, and shutdown screens
+├── utils/              # Platform and diagnostics helpers
+├── main.py             # Canonical entry point
+├── requirements.txt    # Required runtime dependencies
+├── version.py          # Central release identity
+├── LICENSE             # MIT license
+└── README.md           # Project documentation
 ```
 
----
+## Development
 
-## Roadmap
+Use a virtual environment and install the same declared runtime dependencies:
 
-Delivered:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 -m compileall .
+python3 main.py --diagnostics
+```
 
-* ~~Real-time hand tracking with 21 landmarks per hand~~ (Phase 2)
-* ~~Gesture recognition: open palm, fist, point, pinch, two finger, swipe left/right~~ (Phase 3)
-* ~~Touchless mouse control: pointer, click, drag, scrolling, with a safety layer~~ (Phase 4)
-* ~~Touchless device control: volume, mute, media, brightness, window actions and an allowlisted launcher, in an explicit `MOUSE` / `DEVICE` mode~~ (Phase 5)
-* ~~Advanced interaction experience: typed interaction states, a central focus ring, reusable action feedback with a memory-only recent-action timeline, mode aware telemetry and a safety-first shutdown sequence~~ (Phase 6)
-* ~~VisionCore AI assistant: an optional provider-backed conversation panel that can explain real state and request a single allowlisted action through the existing safety gates, with deterministic local answers when no provider is configured~~ (Phase 7)
-* ~~Multimodal AI and voice: an explicitly activated, cancellable, local-only speech input that reaches the same assistant through the same safety gates, plus typed input sources, gesture context and honest `VOICE UNAVAILABLE` reporting~~ (Phase 8)
+The repository intentionally contains production source only; it does not ship a test framework or validation-output directory. Keep local configuration, logs, virtual environments, caches, and validation output outside the tracked source tree. Before a release, review:
 
-Not implemented, and not claimed anywhere in the interface:
+```bash
+git status
+git diff --check
+git ls-files
+```
 
-* Keyboard and shortcut automation, shell commands, arbitrary command execution, system power control (including from the assistant: requests of that kind are refused with a fixed answer and are not representable in the code).
-* Speech recognition without a local engine: voice input needs the `vosk` or `SpeechRecognition` package and a working microphone, and the interface reports `VOICE UNAVAILABLE` rather than approximating one. There is no text-to-speech layer, no wake word and no always-on listening.
-* Browser automation and right-click (a reliable two-finger pinch is not available yet, so right-click is deliberately absent rather than unreliable).
-* Device features the host does not expose: they are reported `UNAVAILABLE` per capability rather than approximated.
+Preserve the existing safety boundaries when making changes. New input sources must use the existing typed intent path, and optional dependencies must remain optional at startup.
 
-Planned capabilities for upcoming releases:
+## Limitations
 
-* Gesture profile customization, sensitivity curves, and custom action mapping.
-* Interactive pointer calibration on top of the configuration based control region.
-* Depth-aware features that use the landmark `z` estimate once it is reliable enough.
-
-*(Note: the HUD reports `CONTROL` as `DISABLED`, `STANDBY`, `ACTIVE` or `ERROR` to match the real control state, so the interface never claims a capability the application does not currently have.)*
-
----
+- Physical camera, microphone, display, and OS control availability depends on the host.
+- The synthetic camera is for lifecycle and rendering validation only; it does not generate a hand or gesture stream.
+- AI requires a user-configured provider and is not required for the local vision pipeline.
+- Voice requires a local speech engine and microphone; there is no cloud speech fallback or text-to-speech output.
+- Linux mouse control requires an X11-compatible session. Windows and macOS behavior differs because their native control APIs differ.
+- Device actions are limited to capabilities exposed by the host and the fixed allowlist. Unsupported capabilities are not emulated.
+- The reported performance and memory values are validation measurements, not universal guarantees.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+VisionCore is distributed under the [MIT License](LICENSE).
+
+## Version
+
+**VisionCore v1.0.0**

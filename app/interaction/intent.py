@@ -6,18 +6,19 @@ priority order from section 16 of Phase 6 is enforced in one place::
     Input source                     Intent router                Control layer
     ├── Gesture   ─┐
     ├── Interface ─┼──► classify by ActionTier ──► handler ──►  MouseController
-    └── Voice *   ─┘                                           DeviceController
-         (* reserved, not implemented)
+    ├── AI        ─┤                                           DeviceController
+    └── Voice *   ─┘
+         (* voice transcripts are normalized into AI text before routing)
 
 Safety always wins: while an emergency stop is engaged every lower priority
 intent is refused, and while control is paused everything below the safety tier
 is refused, so a notification can never crowd out a real safety state.
 
-Voice is deliberately absent. No microphone is opened, no speech model is
-bundled and no service is contacted anywhere in this project.
-:class:`IntentSource.VOICE` exists so a future local layer can plug into exactly
-the same router, and it reports ``available = False`` until such a layer
-actually exists - it is a reservation in the architecture, not a feature.
+Voice capture and transcription live in :mod:`app.voice`. A completed transcript
+enters the assistant as an ordinary text request and therefore reaches this
+router only after the same parser, allowlist, and safety gates as typed input.
+The direct ``IntentSource.VOICE`` value remains unavailable because no second
+voice-specific control path is needed.
 """
 
 from __future__ import annotations

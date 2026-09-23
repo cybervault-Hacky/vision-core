@@ -6,6 +6,7 @@ import sys
 from typing import Any, Dict, Optional
 
 from utils.platform import PlatformInfo
+from version import DISPLAY_VERSION
 
 
 class SystemDiagnostics:
@@ -158,7 +159,7 @@ class SystemDiagnostics:
 
         lines = [
             "+=============================================================+",
-            "|               VISIONCORE SYSTEM DIAGNOSTICS                 |",
+            f"| {f'{DISPLAY_VERSION.upper()} SYSTEM DIAGNOSTICS':^59} |",
             "+=============================================================+",
             f"| Host OS          : {plat.get('system')} {plat.get('release')} ({plat.get('machine')})",
             f"| Display Server   : {plat.get('display_server')}",

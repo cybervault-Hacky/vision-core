@@ -243,6 +243,10 @@ class Application:
                 self.tracker.start()
         else:
             logger.warning("Camera probe failed: %s", msg)
+            # Tracking cannot initialise without a camera. Settle the boot
+            # check explicitly so the screen reports the real dependency failure
+            # instead of waiting forever or implying that tracking is ready.
+            self.window.boot_screen.notify_tracking_result(False, "Camera unavailable")
             self.director.report_error(
                 SystemError(
                     "CAMERA UNAVAILABLE",
@@ -747,8 +751,11 @@ class Application:
         )
         self._camera_probe_thread.start()
 
-        # Report the two subsystems that need no asynchronous probe: the gesture
-        # engine and the control layer both know their state at start-up.
+        # Report the subsystems that need no asynchronous probe. Tracking is
+        # settled here when deliberately disabled; otherwise its worker reports
+        # the real result when it finishes initialising.
+        if not self.config.tracking_enabled:
+            self.window.boot_screen.notify_tracking_result(False, "Tracking disabled in configuration")
         self.window.boot_screen.notify_gesture_result(self.gestures.enabled)
         control_ready = self.config.mouse_control_enabled and self.mouse.available
         self.window.boot_screen.notify_control_result(control_ready, self.mouse.message)

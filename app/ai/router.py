@@ -7,7 +7,7 @@ allowlisted action onto an :class:`~app.interaction.intent.Intent` and hands tha
 intent to the *existing* :class:`~app.interaction.intent.IntentRouter`, which is
 the same router the HUD buttons and the gesture pipeline use.
 
-The chain, in order (Phase 7, section 11)::
+The chain, in order::
 
     parser -> schema validation -> allowlist -> mode check
            -> control-enabled check -> emergency check -> capability check

@@ -17,6 +17,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from ui.animations import ProgressAnimation, PulseAnimation
+from version import DISPLAY_VERSION
 from ui.hud import (
     COLOR_BG_DARK,
     COLOR_CYAN_PRIMARY,
@@ -91,7 +92,7 @@ class ShutdownScreen:
             pygame.draw.line(surface, COLOR_CYAN_PRIMARY, (x, y), (x + length * dx, y), 2)
             pygame.draw.line(surface, COLOR_CYAN_PRIMARY, (x, y), (x, y + length * dy), 2)
 
-        title = fonts["title"].render("VISIONCORE", True, COLOR_TEXT_WHITE)
+        title = fonts["title"].render(DISPLAY_VERSION.upper(), True, COLOR_TEXT_WHITE)
         surface.blit(title, title.get_rect(center=(card.centerx, card.top + 34)))
 
         subtitle, color = (
