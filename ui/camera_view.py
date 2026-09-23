@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import math
 import os
-from typing import Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -14,8 +13,11 @@ import pygame
 
 from app.gestures import GestureSnapshot
 from app.hand_tracking import TrackingSnapshot
+from app.interaction import RecoveryAction
 from app.state import Telemetry
-from ui.animations import PulseAnimation, RotationAnimation
+from ui.animations import PulseAnimation
+from ui.feedback_view import FeedbackView
+from ui.focus_view import FocusView
 from ui.gesture_overlay import GestureOverlay
 from ui.hand_overlay import HandOverlay
 from ui.hud import (
@@ -27,18 +29,19 @@ from ui.hud import (
     COLOR_TEXT_WHITE,
 )
 
+if TYPE_CHECKING:  # the HUD manager is only used to type the injected helper
+    from ui.hud import HUDManager
+
 
 class CameraView:
     """Renders the video viewport with aspect-ratio preservation and HUD overlays."""
 
-    def __init__(self) -> None:
-        self.reticle_rot = RotationAnimation(speed_deg_per_sec=22.0)
+    def __init__(self, hud: Optional["HUDManager"] = None) -> None:
         self.pulse = PulseAnimation(min_val=0.4, max_val=1.0, frequency_hz=1.0)
         self.hand_overlay = HandOverlay()
         self.gesture_overlay = GestureOverlay()
-
-        # Cached surface for the scaled video frame
-        self._last_frame_surf: Optional[pygame.Surface] = None
+        self.focus_view = FocusView()
+        self.feedback_view = FeedbackView(hud=hud)
 
     def update(
         self,
@@ -47,7 +50,6 @@ class CameraView:
         gesture: GestureSnapshot,
     ) -> None:
         """Advance animation states."""
-        self.reticle_rot.update(dt)
         self.pulse.update(dt)
         self.hand_overlay.update(dt, tracking)
         self.gesture_overlay.update(dt, gesture, tracking)
@@ -104,43 +106,6 @@ class CameraView:
         pygame.draw.line(surface, color, (x, y + h), (x, y + h - b_len), thickness)
         pygame.draw.line(surface, color, (x + w, y + h), (x + w - b_len, y + h), thickness)
         pygame.draw.line(surface, color, (x + w, y + h), (x + w, y + h - b_len), thickness)
-
-    def draw_targeting_reticle(
-        self,
-        surface: pygame.Surface,
-        center: Tuple[int, int],
-        radius: int = 40,
-    ) -> None:
-        """Rotating circular telemetry reticle used while searching for a hand."""
-        cx, cy = center
-        angle_rad = math.radians(self.reticle_rot.angle)
-        rc = radius + 4
-        reticle_surf = pygame.Surface((rc * 2, rc * 2), pygame.SRCALPHA)
-
-        pygame.draw.circle(reticle_surf, (*COLOR_CYAN_PRIMARY, 55), (rc, rc), radius, 1)
-
-        for i in range(4):
-            start_a = angle_rad + i * (math.pi / 2)
-            end_a = start_a + math.pi / 4
-            pts = [
-                (
-                    rc + int((radius + 2) * math.cos(start_a + (end_a - start_a) * (step / 7))),
-                    rc + int((radius + 2) * math.sin(start_a + (end_a - start_a) * (step / 7))),
-                )
-                for step in range(8)
-            ]
-            pygame.draw.lines(reticle_surf, (*COLOR_CYAN_PRIMARY, 150), False, pts, 2)
-
-        tick = 6
-        for a, b in (
-            ((rc - tick, rc), (rc - 2, rc)),
-            ((rc + 2, rc), (rc + tick, rc)),
-            ((rc, rc - tick), (rc, rc - 2)),
-            ((rc, rc + 2), (rc, rc + tick)),
-        ):
-            pygame.draw.line(reticle_surf, (*COLOR_ICE_BLUE, 170), a, b, 1)
-
-        surface.blit(reticle_surf, (cx - rc, cy - rc))
 
     # -- surfaces ---------------------------------------------------------- #
 
@@ -204,8 +169,15 @@ class CameraView:
         fonts: Dict[str, pygame.font.Font],
         tracking: TrackingSnapshot,
         gesture: GestureSnapshot,
-    ) -> None:
-        """Render the complete camera viewport, video surface, and HUD layers."""
+    ) -> Optional[Tuple[RecoveryAction, pygame.Rect]]:
+        """Render the complete camera viewport, video surface, and HUD layers.
+
+        Draw order is deliberate: video, focus ring (so the hand is never
+        covered by chrome), hand overlay, badges, gesture effects, and finally
+        the action feedback layer, which must stay readable above everything
+        else. Returns the rectangle of the RETRY button when an error state with
+        a real recovery is shown, so the window can route the click.
+        """
         pygame.draw.rect(surface, (5, 8, 12), viewport_rect)
         pygame.draw.rect(surface, COLOR_PANEL_BORDER, viewport_rect, 1)
 
@@ -220,18 +192,18 @@ class CameraView:
             )
             surface.blit(frame_surf, fitted_rect.topleft)
 
-            # Hand tracking layer reacts to the actual tracking state
-            self.hand_overlay.render(surface, fitted_rect, tracking, fonts)
+            # Central focus: status ring, focus readout and tracking quality. It
+            # is drawn before the hand so tracked geometry stays legible.
+            self.focus_view.render(surface, fitted_rect, telemetry, fonts)
 
-
-
-            # Ambient reticle only while the pipeline has nothing locked
-            if not tracking.state.is_engaged:
-                self.draw_targeting_reticle(
-                    surface,
-                    (fitted_rect.centerx, fitted_rect.centery),
-                    radius=40,
-                )
+            # Hand tracking layer reacts to the real tracking state. It is
+            # clipped to the video area so no overlay can ever spill into the
+            # letterbox bars, the header or the sidebar.
+            surface.set_clip(fitted_rect)
+            try:
+                self.hand_overlay.render(surface, fitted_rect, tracking, fonts)
+            finally:
+                surface.set_clip(None)
 
         pygame.draw.rect(surface, (18, 36, 56), fitted_rect, 1)
         self.draw_corner_brackets(surface, fitted_rect, bracket_len=26, thickness=2)
@@ -247,7 +219,12 @@ class CameraView:
             tracking,
             fonts,
             (fitted_rect.right - 14, badge_top - 10),
+            telemetry,
         )
+
+        # Feedback last: a notification reports a real result and an error strip
+        # offers a recovery, so neither may be hidden behind another layer.
+        return self.feedback_view.render_overlay(surface, fitted_rect, telemetry, fonts)
 
     def _draw_viewport_badges(
         self,
@@ -291,12 +268,15 @@ class CameraView:
             if telemetry.camera_width > 0
             else "CAM IDLE"
         )
+        # Bottom anchored from the badge's own height so it always sits fully
+        # inside the video area, at any window size.
+        badge_height = fonts["mono_small"].get_height() + 8
         resolution_rect = self._overlay_badge(
             surface,
             res_str,
             fonts["mono_small"],
             COLOR_ICE_BLUE,
-            (fitted_rect.right - 14, fitted_rect.bottom - 12),
+            (fitted_rect.right - 14, fitted_rect.bottom - 12 - badge_height),
             align_right=True,
         )
 
@@ -312,4 +292,42 @@ class CameraView:
             (fitted_rect.right - 14, resolution_rect.top - 6),
             align_right=True,
         )
-        return pipeline_rect.top
+
+        # Performance readout: measured values only, and only while the user has
+        # the diagnostics readout switched on ([P]).
+        top = pipeline_rect.top
+        if telemetry.diagnostics_visible:
+            metrics_rect = self._overlay_badge(
+                surface,
+                self._performance_text(telemetry),
+                fonts["mono_small"],
+                COLOR_ICE_BLUE,
+                (fitted_rect.right - 14, top - 6),
+                align_right=True,
+            )
+            top = metrics_rect.top
+        return top
+
+    @staticmethod
+    def _performance_text(telemetry: Telemetry) -> str:
+        """FPS, tracking, gesture and control cost, with ``--`` when unmeasured.
+
+        Every value is measured by the subsystem that owns it; a metric that has
+        not been produced yet is shown as ``--`` rather than estimated.
+        """
+
+        def value(number: float, decimals: int, suffix: str) -> str:
+            return f"{number:.{decimals}f} {suffix}" if number > 0 else "--"
+
+        return (
+            f"FPS {telemetry.render_fps:.0f}  |  "
+            f"TRACK {value(telemetry.tracking_latency_ms, 1, 'MS')}  |  "
+            f"GESTURE {value(telemetry.gesture_latency_ms, 2, 'MS')}  |  "
+            f"CONTROL {value(telemetry.control_latency_ms, 2, 'MS')}"
+            if telemetry.render_fps > 0
+            else (
+                f"FPS --  |  TRACK {value(telemetry.tracking_latency_ms, 1, 'MS')}  |  "
+                f"GESTURE {value(telemetry.gesture_latency_ms, 2, 'MS')}  |  "
+                f"CONTROL {value(telemetry.control_latency_ms, 2, 'MS')}"
+            )
+        )

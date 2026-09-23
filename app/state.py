@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from app.controls.device_types import DeviceAction, DeviceSnapshot
 from app.controls.safety import (
@@ -20,7 +20,11 @@ from app.gestures.types import (
     GestureSnapshot,
     GestureState,
 )
+from app.ai.types import AISnapshot
+from app.voice.types import VoiceSnapshot
 from app.hand_tracking import TrackingState
+from app.interaction.feedback import ActionFeedback
+from app.interaction.states import InteractionSnapshot
 
 
 # Label maps keep the telemetry model free of presentation logic while still
@@ -119,6 +123,7 @@ class Telemetry:
     control_clicks: int = 0
     control_scroll_events: int = 0
     control_emergency_stops: int = 0
+    control_action_events: int = 0
 
     # Device control metrics (typed actions and real capability reports)
     control_mode: ControlMode = ControlMode.MOUSE
@@ -139,8 +144,11 @@ class Telemetry:
     device_suspended: bool = False
     device_suspended_reason: str = ""
     device_capabilities: Dict[str, bool] = field(default_factory=dict)
+    device_capability_notes: Dict[str, str] = field(default_factory=dict)
     device_launchable: Dict[str, str] = field(default_factory=dict)
+    device_action_detail: str = ""
     device_actions: int = 0
+    device_action_events: int = 0
     device_emergency_stops: int = 0
 
     # Gesture recognition metrics (geometry derived, never simulated)
@@ -159,14 +167,33 @@ class Telemetry:
     tracker_fps: float = 0.0
     tracking_latency_ms: float = 0.0
     tracking_engine: str = "MEDIAPIPE HANDS"
+    tracking_error: str = ""
+    tracking_lock_progress: float = 0.0
     tracking_dropped_frames: int = 0
     max_hands: int = 1
 
-    # Performance telemetry
+    # Performance telemetry (every value is measured; 0 means "not available")
     render_fps: float = 0.0
+    control_latency_ms: float = 0.0
     frame_count: int = 0
     dropped_frames: int = 0
     start_time: float = field(default_factory=time.time)
+    diagnostics_visible: bool = True
+
+    # Interaction experience (Phase 6). The director derives these from the real
+    # subsystem state above; the subsystem state remains authoritative.
+    interaction: InteractionSnapshot = field(default_factory=InteractionSnapshot)
+    feedback: Tuple[ActionFeedback, ...] = ()
+    toast: Optional[ActionFeedback] = None
+
+    # AI assistant (Phase 7). A snapshot only: the assistant owns its own state,
+    # the conversation lives in memory and nothing here is ever persisted.
+    ai: AISnapshot = field(default_factory=AISnapshot)
+    ai_panel_visible: bool = False
+
+    # Voice input (Phase 8). Also a snapshot only: the microphone belongs to the
+    # voice controller, and ``voice.state`` is OFF until the user activates it.
+    voice: VoiceSnapshot = field(default_factory=VoiceSnapshot)
 
     # Error handling context
     error_title: Optional[str] = None
@@ -242,6 +269,7 @@ class Telemetry:
         self.control_clicks = snapshot.clicks
         self.control_scroll_events = snapshot.scroll_events
         self.control_emergency_stops = snapshot.emergency_stops
+        self.control_action_events = snapshot.action_events
 
         screen = snapshot.screen
         if snapshot.pointer_active and screen is not None:
@@ -273,10 +301,37 @@ class Telemetry:
         self.device_suspended = snapshot.suspended
         self.device_suspended_reason = snapshot.suspended_reason
         self.device_capabilities = snapshot.capability_map
+        self.device_capability_notes = snapshot.capability_notes
         self.device_launchable = dict(snapshot.launchable)
+        self.device_action_detail = snapshot.action_detail
         self.device_actions = snapshot.actions_performed
+        self.device_action_events = snapshot.action_events
         self.device_emergency_stops = snapshot.emergency_stops
         self.device = _CONTROL_SUBSYSTEM[self.device_state]
+
+    def update_interaction(
+        self,
+        snapshot: InteractionSnapshot,
+        feedback: Tuple[ActionFeedback, ...] = (),
+        toast: Optional[ActionFeedback] = None,
+    ) -> None:
+        """Publish the interaction layer for this frame.
+
+        ``feedback`` is the in-memory recent-action timeline (newest first) and
+        ``toast`` is the notification currently shown, if any. Both are produced
+        by the interaction director from real action results.
+        """
+        self.interaction = snapshot
+        self.feedback = feedback
+        self.toast = toast
+
+    def update_ai(self, snapshot: AISnapshot) -> None:
+        """Publish the assistant snapshot for this frame."""
+        self.ai = snapshot
+
+    def update_voice(self, snapshot: VoiceSnapshot) -> None:
+        """Publish the voice input snapshot for this frame."""
+        self.voice = snapshot
 
     def set_device_unavailable(self) -> None:
         """Mark device control as not running (shutdown / camera loss)."""

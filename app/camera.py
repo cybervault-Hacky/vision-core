@@ -12,6 +12,11 @@ import numpy as np
 
 logger = logging.getLogger("visioncore.camera")
 
+# Returned by ``CameraManager.start`` when an orderly shutdown cancelled the
+# open. It is a lifecycle cancellation, never a hardware failure, and callers
+# must not surface it to the user as a camera error.
+CAMERA_START_CANCELLED = "CAMERA START CANCELLED (shutdown)"
+
 
 class MockCameraSource:
     """Synthetic calibration pattern generator for headless environments."""
@@ -122,6 +127,10 @@ class CameraManager:
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._lock = threading.Lock()
+        # Serializes start() against release(): a release can never tear the
+        # capture down while an initialization is still using it, and a start
+        # that observes a cancelled shutdown never publishes a live stream.
+        self._lifecycle_lock = threading.RLock()
 
         # Telemetry & metrics
         self._latest_frame: Optional[np.ndarray] = None
@@ -183,89 +192,112 @@ class CameraManager:
         except Exception as exc:
             return False, f"Error probing camera {camera_index}: {exc}", info
 
-    def start(self) -> Tuple[bool, str]:
-        """Initialize the camera hardware and start the asynchronous capture worker."""
-        if self.is_active:
-            logger.info("Camera is already active.")
-            return True, "Camera already running"
+    def start(self, cancel_event: Optional[threading.Event] = None) -> Tuple[bool, str]:
+        """Initialize the camera hardware and start the asynchronous capture worker.
 
-        logger.info(
-            "Initializing camera index %d (mock_mode=%s)...",
-            self.camera_index,
-            self.mock_mode,
-        )
+        Orderly shutdown must be able to stop an in-flight open, so
+        ``cancel_event`` is checked before the device is touched and again before
+        any live state is published. The whole method holds ``_lifecycle_lock``, so
+        ``release()`` can never tear the capture down while this code still holds
+        it. A cancelled start is a lifecycle cancellation rather than a hardware
+        failure and is reported with ``CAMERA_START_CANCELLED``, so no caller can
+        mistake a shutdown for a broken camera.
+        """
+        with self._lifecycle_lock:
+            if self.is_active:
+                logger.info("Camera is already active.")
+                return True, "Camera already running"
 
-        try:
-            if self.mock_mode:
-                self._capture = MockCameraSource()
-            else:
-                self._capture = cv2.VideoCapture(self.camera_index)
-
-            if not self._capture.isOpened():
-                err_msg = f"Failed to open camera device at index {self.camera_index}"
-                logger.warning(err_msg)
-                self.release()
-                return False, err_msg
-
-            if self.mock_mode:
-                self.backend = "SYNTHETIC"
-            elif hasattr(self._capture, "getBackendName"):
-                try:
-                    self.backend = self._capture.getBackendName()
-                except Exception:
-                    self.backend = "OpenCV VideoCapture"
-            else:
-                self.backend = "OpenCV VideoCapture"
-
-            # Verify initial frame readability
-            ret, test_frame = self._capture.read()
-            if not ret or test_frame is None or test_frame.size == 0:
-                err_msg = f"Camera index {self.camera_index} opened but returned no valid frames"
-                logger.warning(err_msg)
-                self.release()
-                return False, err_msg
-
-            # Query dimensions and properties
-            raw_w = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            raw_h = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            raw_fps = float(self._capture.get(cv2.CAP_PROP_FPS))
-
-            self.width = raw_w if raw_w > 0 else test_frame.shape[1]
-            self.height = raw_h if raw_h > 0 else test_frame.shape[0]
-            self.hardware_fps = raw_fps if raw_fps > 0 else 30.0
-
-            # Store the initial frame (converted to RGB)
-            initial_rgb = cv2.cvtColor(test_frame, cv2.COLOR_BGR2RGB)
-            if self.mirror:
-                initial_rgb = cv2.flip(initial_rgb, 1)
-
-            with self._lock:
-                self._latest_frame = initial_rgb
-                self._running = True
-
-            # Start asynchronous background capture thread
-            self._thread = threading.Thread(
-                target=self._capture_worker,
-                name="VisionCoreCameraWorker",
-                daemon=True,
-            )
-            self._thread.start()
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("Camera start cancelled before the device was opened")
+                return False, CAMERA_START_CANCELLED
 
             logger.info(
-                "Camera %d online: %dx%d @ %.1f FPS [Backend: %s]",
+                "Initializing camera index %d (mock_mode=%s)...",
                 self.camera_index,
-                self.width,
-                self.height,
-                self.hardware_fps,
-                self.backend,
+                self.mock_mode,
             )
-            return True, "Camera online"
 
-        except Exception as exc:
-            err_msg = f"Unexpected exception initializing camera {self.camera_index}: {exc}"
-            logger.error(err_msg, exc_info=True)
-            self.release()
-            return False, err_msg
+            try:
+                if self.mock_mode:
+                    self._capture = MockCameraSource()
+                else:
+                    self._capture = cv2.VideoCapture(self.camera_index)
+
+                if self._capture is None or not self._capture.isOpened():
+                    err_msg = f"Failed to open camera device at index {self.camera_index}"
+                    logger.warning(err_msg)
+                    self.release()
+                    return False, err_msg
+
+                if self.mock_mode:
+                    self.backend = "SYNTHETIC"
+                elif hasattr(self._capture, "getBackendName"):
+                    try:
+                        self.backend = self._capture.getBackendName()
+                    except Exception:
+                        self.backend = "OpenCV VideoCapture"
+                else:
+                    self.backend = "OpenCV VideoCapture"
+
+                # Verify initial frame readability
+                ret, test_frame = self._capture.read()
+                if not ret or test_frame is None or test_frame.size == 0:
+                    err_msg = (
+                        f"Camera index {self.camera_index} opened but returned no valid frames"
+                    )
+                    logger.warning(err_msg)
+                    self.release()
+                    return False, err_msg
+
+                # The device opened, but shutdown may have started meanwhile: drop
+                # it again without publishing a live stream or an error.
+                if cancel_event is not None and cancel_event.is_set():
+                    logger.info("Camera start cancelled before the stream was published")
+                    self.release()
+                    return False, CAMERA_START_CANCELLED
+
+                # Query dimensions and properties
+                raw_w = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+                raw_h = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                raw_fps = float(self._capture.get(cv2.CAP_PROP_FPS))
+
+                self.width = raw_w if raw_w > 0 else test_frame.shape[1]
+                self.height = raw_h if raw_h > 0 else test_frame.shape[0]
+                self.hardware_fps = raw_fps if raw_fps > 0 else 30.0
+
+                # Store the initial frame (converted to RGB)
+                initial_rgb = cv2.cvtColor(test_frame, cv2.COLOR_BGR2RGB)
+                if self.mirror:
+                    initial_rgb = cv2.flip(initial_rgb, 1)
+
+                with self._lock:
+                    self._latest_frame = initial_rgb
+                    self._running = True
+
+                # Start asynchronous background capture thread
+                self._thread = threading.Thread(
+                    target=self._capture_worker,
+                    name="VisionCoreCameraWorker",
+                    daemon=True,
+                )
+                self._thread.start()
+
+                logger.info(
+                    "Camera %d online: %dx%d @ %.1f FPS [Backend: %s]",
+                    self.camera_index,
+                    self.width,
+                    self.height,
+                    self.hardware_fps,
+                    self.backend,
+                )
+                return True, "Camera online"
+
+            except Exception as exc:
+                err_msg = f"Unexpected exception initializing camera {self.camera_index}: {exc}"
+                logger.error(err_msg, exc_info=True)
+                self.release()
+                return False, err_msg
 
     def _capture_worker(self) -> None:
         """Asynchronous worker loop continuously polling the camera hardware."""
@@ -340,18 +372,23 @@ class CameraManager:
             self._thread = None
 
     def release(self) -> None:
-        """Stop capture and release all camera hardware resources."""
-        self.stop()
-        with self._lock:
-            if self._capture is not None:
-                try:
-                    self._capture.release()
-                except Exception as exc:
-                    logger.warning("Error releasing camera device: %s", exc)
-                self._capture = None
-            self._latest_frame = None
-            self._running = False
-            self.width = 0
-            self.height = 0
-            self.hardware_fps = 0.0
+        """Stop capture and release all camera hardware resources.
+
+        Runs under ``_lifecycle_lock``: it waits for an in-flight ``start()`` to
+        finish instead of pulling the capture out from under it.
+        """
+        with self._lifecycle_lock:
+            self.stop()
+            with self._lock:
+                if self._capture is not None:
+                    try:
+                        self._capture.release()
+                    except Exception as exc:
+                        logger.warning("Error releasing camera device: %s", exc)
+                    self._capture = None
+                self._latest_frame = None
+                self._running = False
+                self.width = 0
+                self.height = 0
+                self.hardware_fps = 0.0
         logger.info("Camera resources released successfully")

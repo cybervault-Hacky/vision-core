@@ -53,6 +53,9 @@ _TRAVEL_ANCHORS = (0, FINGER_JOINTS["MIDDLE"][0])
 # Minimum gap between two identical "capability unavailable" notices.
 _NOTE_INTERVAL_SEC = 2.5
 
+# Volume/brightness change applied by one direct (non-gesture) request, in percent.
+DIRECT_STEP = 6.0
+
 
 class DeviceController:
     """Routes stable gestures to platform device actions, safely."""
@@ -95,6 +98,7 @@ class DeviceController:
         self._last_brightness_action_at = 0.0
         self._level_read_at = 0.0
         self._actions = 0
+        self._action_events = 0
         self._emergency_stops = 0
         self._notes: Dict[DeviceCapability, float] = {}
         self._frame_now: Optional[float] = None
@@ -147,6 +151,12 @@ class DeviceController:
             self._cancel_continuous()
             self._open_palm_since = None
             self._mute_cycle_active = False
+            if self._state is ControlState.ACTIVE:
+                # Leaving DEVICE mode suspends the layer: it stays armed but can
+                # perform nothing, so neither the HUD nor telemetry may report it
+                # as ACTIVE while the application is in MOUSE mode. The emergency
+                # stop, a pause and a disabled layer are all left untouched.
+                self._state = ControlState.ARMED
         logger.info("Device control mode: %s", mode.label)
 
     def enable(self) -> bool:
@@ -164,6 +174,9 @@ class DeviceController:
         self._state = ControlState.ARMED
         self._message = ""
         self._refresh_levels(force=True)
+        # Publish immediately: the layer is armed for work now, and every reader
+        # (telemetry, the assistant's context, the HUD) must see that now.
+        self._publish(self._now())
         logger.info("Device control armed (backend=%s)", self.backend.name)
         return True
 
@@ -172,6 +185,7 @@ class DeviceController:
         self._cancel_continuous()
         self._state = ControlState.DISABLED
         self._message = self._startup_message()
+        self._publish(self._now())
         logger.info("Device control disabled")
 
     def pause(self) -> None:
@@ -180,6 +194,7 @@ class DeviceController:
             self._cancel_continuous()
             self._state = ControlState.PAUSED
             self._message = ""
+            self._publish(self._now())
             logger.info("Device control paused")
 
     def resume(self) -> None:
@@ -192,6 +207,7 @@ class DeviceController:
         self._gate.reset()
         self._state = ControlState.ARMED
         self._message = ""
+        self._publish(self._now())
         logger.info("Device control resumed")
 
     def toggle(self) -> bool:
@@ -227,6 +243,7 @@ class DeviceController:
             )
         )
         logger.warning("Device emergency stop: %s", reason)
+        self._publish(self._now())
 
     def on_tracking_lost(self) -> None:
         """Tracking pipeline stopped (camera loss): cancel, never keep a state."""
@@ -265,11 +282,106 @@ class DeviceController:
         )
 
     def perform(self, action: DeviceAction, runner=None, detail: str = "") -> DeviceActionResult:
-        """Run one action through the full gate chain (also used by buttons)."""
+        """Run one action through the full gate chain (also used by buttons).
+
+        The rate policy is applied here exactly as the gesture handlers apply it,
+        so a direct request - VisionCore AI or an interface button - can neither
+        repeat an action faster than its cooldown nor fire the same action a
+        gesture just performed. Continuous actions (volume, brightness) use their
+        own interval, event actions (media, mute, window) use the cooldown.
+        """
         now = self._now()
         capability = action.capability
+        if action.is_continuous:
+            interval, last = self._continuous_policy(action)
+            if not self._rate_ok(now, last, interval):
+                return self._rate_limited(action, now, capability, interval)
+        else:
+            last = self._last_action_at.get(action)
+            if last is not None and not self._rate_ok(
+                now, last, self.settings.action_cooldown_sec
+            ):
+                return self._rate_limited(
+                    action, now, capability, self.settings.action_cooldown_sec
+                )
+
         result = self._execute(action, now, runner, capability, detail)
+        if result.success:
+            if action.is_continuous:
+                self._note_continuous_action(action, now)
+            else:
+                self._last_action_at[action] = now
         self._record(result)
+        # Direct actions happen outside the frame loop, so republish at once:
+        # the interface must show this result, never the previous one.
+        self._publish(now)
+        return result
+
+    def _continuous_policy(self, action: DeviceAction) -> Tuple[float, float]:
+        """Rate interval and last-action time for a continuous action."""
+        if action in (DeviceAction.VOLUME_UP, DeviceAction.VOLUME_DOWN):
+            return self.settings.volume_interval_sec, self._last_volume_action_at
+        return self.settings.brightness_interval_sec, self._last_brightness_action_at
+
+    def _note_continuous_action(self, action: DeviceAction, now: float) -> None:
+        if action in (DeviceAction.VOLUME_UP, DeviceAction.VOLUME_DOWN):
+            self._last_volume_action_at = now
+        else:
+            self._last_brightness_action_at = now
+
+    def _rate_limited(
+        self,
+        action: DeviceAction,
+        now: float,
+        capability: Optional[DeviceCapability],
+        interval: float,
+    ) -> DeviceActionResult:
+        """Report a refused action truthfully instead of silently dropping it."""
+        result = DeviceActionResult(
+            False,
+            action,
+            "ACTION COOLDOWN",
+            now,
+            capability,
+            f"RATE LIMITED ({interval:.2f}s)",
+        )
+        self._record(result, silent=True)
+        return result
+
+    def run_action(self, action: DeviceAction, step: float = DIRECT_STEP) -> DeviceActionResult:
+        """Run one allowlisted action once, through the same gates as a gesture.
+
+        This is the single direct entry point for a request that did not come
+        from a gesture - VisionCore AI uses it, and any future interface button
+        can too. The runner is the same call the gesture handlers make, so the
+        behaviour, the rate policy and the honesty of the result are identical:
+        the action is refused when control is not enabled, when the platform does
+        not offer the capability, and when the backend declines.
+        """
+        magnitude = max(1.0, min(25.0, float(step)))
+        runners = {
+            DeviceAction.VOLUME_UP: lambda: self._apply_volume(magnitude),
+            DeviceAction.VOLUME_DOWN: lambda: self._apply_volume(-magnitude),
+            DeviceAction.MUTE: self.backend.mute_toggle,
+            DeviceAction.PLAY_PAUSE: lambda: self.backend.media(MediaAction.PLAY_PAUSE),
+            DeviceAction.NEXT_TRACK: lambda: self.backend.media(MediaAction.NEXT),
+            DeviceAction.PREVIOUS_TRACK: lambda: self.backend.media(MediaAction.PREVIOUS),
+            DeviceAction.BRIGHTNESS_UP: lambda: self._apply_brightness(magnitude),
+            DeviceAction.BRIGHTNESS_DOWN: lambda: self._apply_brightness(-magnitude),
+            DeviceAction.MINIMIZE: lambda: self.backend.window(WindowAction.MINIMIZE),
+            DeviceAction.MAXIMIZE: lambda: self.backend.window(WindowAction.MAXIMIZE),
+            DeviceAction.NEXT_WINDOW: lambda: self.backend.window(WindowAction.NEXT),
+        }
+        runner = runners.get(action)
+        if runner is None:
+            return DeviceActionResult(
+                False, action, "ACTION NOT AVAILABLE", self._now(), action.capability
+            )
+        result = self.perform(action, runner=runner)
+        if result.success and action is DeviceAction.VOLUME_UP:
+            self._volume_steps += 1
+        elif result.success and action is DeviceAction.VOLUME_DOWN:
+            self._volume_steps -= 1
         return result
 
     # -- per frame --------------------------------------------------------- #
@@ -501,6 +613,14 @@ class DeviceController:
             return DeviceActionResult(
                 False, action, "CONTROL NOT ENABLED", now, capability, "DEVICE DISABLED"
             )
+        if self._mode is not ControlMode.DEVICE:
+            # Mode gate at the controller itself, not only at the caller: while
+            # the application is in MOUSE mode the device layer can never act,
+            # whoever asks - a gesture handler, VisionCore AI or an interface
+            # button. A mode change is the only way to arm it.
+            return DeviceActionResult(
+                False, action, "DEVICE MODE REQUIRED", now, capability, "MOUSE MODE ACTIVE"
+            )
         if capability is not None and not self.backend.supports(capability):
             return DeviceActionResult(
                 False, action, f"{capability.label} UNAVAILABLE", now, capability,
@@ -617,6 +737,9 @@ class DeviceController:
         self._last_result = result
         if silent:
             return
+        # Every user visible result counts as an event - including a refusal, so
+        # the interface can report it honestly instead of showing a success.
+        self._action_events += 1
         if result.success:
             self._actions += 1
             if self._message.endswith("UNAVAILABLE"):
@@ -644,9 +767,12 @@ class DeviceController:
 
     def _build_snapshot(self, now: float, action_age: Optional[float] = None) -> DeviceSnapshot:
         result = self._last_result
+        reports = self.backend.capabilities()
         capabilities = tuple(
-            (report.capability.label, report.available)
-            for report in self.backend.capabilities()
+            (report.capability.label, report.available) for report in reports
+        )
+        capability_details = tuple(
+            (report.capability.label, report.detail) for report in reports
         )
         if action_age is None:
             action_age = now - result.timestamp if result is not None else 0.0
@@ -661,6 +787,7 @@ class DeviceController:
             suspended=self._suspended,
             suspended_reason=self._suspended_reason,
             capability_summary=capabilities,
+            capability_details=capability_details,
             volume=self._volume,
             volume_known=self._volume is not None,
             volume_steps=self._volume_steps,
@@ -669,8 +796,10 @@ class DeviceController:
             brightness_known=self._brightness is not None,
             action_label=result.message if result is not None else "",
             action_success=result.success if result is not None else True,
+            action_detail=result.detail if result is not None else "",
             action_age=action_age,
             actions_performed=self._actions,
+            action_events=self._action_events,
             emergency_stops=self._emergency_stops,
             launchable=self.backend.launchable(),
         )

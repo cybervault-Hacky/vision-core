@@ -400,25 +400,29 @@ class HandOverlay:
         snapshot: TrackingSnapshot,
         fonts: Dict[str, pygame.font.Font],
     ) -> None:
-        """Bottom-left readout describing the real tracking state."""
+        """Bottom-left readout describing the real tracking state.
+
+        Rows are dropped from the bottom up until the block fits inside the video
+        area, so a short window shows the tracking state and the hand count
+        instead of a panel that spills out of the viewport.
+        """
         state = snapshot.state
         hand = snapshot.primary
 
         holding = state.is_engaged and not snapshot.detected
-        rows: List[Tuple[str, str, Tuple[int, int, int]]] = []
-        rows.append(
+        rows: List[Tuple[str, str, Tuple[int, int, int]]] = [
             (
                 "TRACKING",
                 "HOLD" if holding else state.status_label,
                 COLOR_STANDBY if holding else self._state_color(state),
             )
-        )
+        ]
 
         if hand is not None:
-            if hand.handedness:
-                rows.append(("HAND", hand.handedness, COLOR_TEXT_WHITE))
             if hand.confidence is not None:
                 rows.append(("CONFIDENCE", f"{hand.confidence * 100:.1f}%", COLOR_ICE_BLUE))
+            if hand.handedness:
+                rows.append(("HAND", hand.handedness, COLOR_TEXT_WHITE))
             if len(snapshot.hands) > 1:
                 rows.append(("HANDS", str(len(snapshot.hands)), COLOR_ICE_BLUE))
 
@@ -428,8 +432,21 @@ class HandOverlay:
         padding = 14
         row_height = 17
         banner_height = 24
-        width = 244
-        height = padding * 2 + banner_height + row_height * len(rows) + 4
+        # A narrow video area cannot host this block, the central focus readout
+        # and the gesture readout at once, so the block is skipped rather than
+        # crowded against them: the same readings stay available in the sidebar
+        # (HAND TRACKING module) and in the focus quality chip.
+        if fitted.width < 560:
+            return
+        width = min(244, fitted.width - 28)
+        available = max(88, fitted.height - 28)
+
+        def panel_height(count: int) -> int:
+            return padding * 2 + banner_height + row_height * count + 4
+
+        while len(rows) > 1 and panel_height(len(rows)) > available:
+            rows.pop()
+        height = panel_height(len(rows))
 
         panel = self._layer("status", (width, height))
         panel.fill((*(7, 14, 23), 205))
@@ -465,11 +482,13 @@ class HandOverlay:
             sweep = self._layer("flash", (sweep_width, height))
             for column in range(sweep_width):
                 column_alpha = int(sweep_alpha * (1.0 - column / sweep_width))
-                pygame.draw.line(sweep, (*banner_color, column_alpha), (column, 0), (column, height))
+                pygame.draw.line(
+                    sweep, (*banner_color, column_alpha), (column, 0), (column, height)
+                )
             panel.blit(sweep, (int((width - sweep_width) * (1.0 - flash)), 0))
 
-        banner = fonts["caption"].render(banner, True, banner_color)
-        panel.blit(banner, (padding + 14, padding + 4))
+        banner_surface = fonts["caption"].render(banner, True, banner_color)
+        panel.blit(banner_surface, (padding + 14, padding + 4))
 
         offset = padding + banner_height + 2
         for label, value, value_color in rows:
@@ -482,9 +501,7 @@ class HandOverlay:
             )
             offset += row_height
 
-        x = fitted.left + 14
-        y = fitted.bottom - height - 14
-        surface.blit(panel, (x, y))
+        surface.blit(panel, (fitted.left + 14, fitted.bottom - height - 14))
 
     @staticmethod
     def _banner_text(state: TrackingState) -> str:

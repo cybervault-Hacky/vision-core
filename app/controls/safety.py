@@ -152,6 +152,11 @@ class ControlSnapshot:
     clicks: int = 0
     scroll_events: int = 0
     emergency_stops: int = 0
+    # Monotonic count of every action the layer reported (accepted or refused).
+    # ``action`` above is only the latest one, which a later frame can overwrite
+    # before it is observed; this counter lets the interface detect a new result
+    # without inventing an event stream.
+    action_events: int = 0
 
     @property
     def enabled(self) -> bool:
@@ -234,4 +239,7 @@ class ControlCounters:
     clicks: int = 0
     scroll_events: int = 0
     emergency_stops: int = 0
+    # Every action the layer reported (accepted or refused), used to detect new
+    # results for the action feedback without inventing an event stream.
+    action_events: int = 0
     meta: Mapping[str, object] = field(default_factory=lambda: EMPTY_META)

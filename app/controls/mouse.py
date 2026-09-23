@@ -231,6 +231,9 @@ class MouseController:
         self._counters.emergency_stops += 1
         self._set_action(ControlAction.EMERGENCY_STOP)
         self._message = reason
+        # Republish immediately: the release above happened outside the frame
+        # loop, so the interface must not keep showing a pointer that is gone.
+        self._refresh_snapshot()
         logger.warning("Emergency stop: %s", reason)
 
     def on_tracking_lost(self) -> None:
@@ -563,6 +566,7 @@ class MouseController:
     def _set_action(self, action: ControlAction) -> None:
         self._action = action
         self._action_at = self._now()
+        self._counters.action_events += 1
 
     def _snapshot_for(
         self,
@@ -605,6 +609,7 @@ class MouseController:
             clicks=self._counters.clicks,
             scroll_events=self._counters.scroll_events,
             emergency_stops=self._counters.emergency_stops,
+            action_events=self._counters.action_events,
         )
 
     def _publish(self, snapshot: ControlSnapshot) -> ControlSnapshot:

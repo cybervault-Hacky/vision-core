@@ -42,7 +42,7 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
   * Original visual identity: deep dark slate backdrop, cool cyan accents, ice-blue telemetry, and neutral typography.
   * Real-time hardware telemetry: resolution, camera FPS, render FPS, device index, and orientation.
   * Live status matrix: truthful subsystem reporting (`VISION CORE: ONLINE`, `CAMERA: ONLINE`, `TRACKING: SEARCHING|ACTIVE|LOST`, `GESTURES: SEARCHING|ACTIVE|DISABLED`, `CONTROL: DISABLED`).
-  * Subtle scanning animations: vertical sweeping scanline, rotating circular reticle, live indicator pulse, and sci-fi corner brackets.
+  * Subtle scanning animations: central focus ring sweep, live indicator pulse, and sci-fi corner brackets.
 * **Gesture Recognition Pipeline**:
   * `CAMERA → HAND TRACKING → LANDMARKS → GESTURE ENGINE → RECOGNISED GESTURE → HUD`.
   * Landmark features only: finger extension is scored from wrist-to-tip reach and PIP joint angles, pinch from tip separation relative to palm scale. Nothing is matched against image templates or hard-coded screen regions.
@@ -57,10 +57,37 @@ It delivers a rock-solid desktop application architecture, a hardware camera cap
   * Tracking data model (`HandTrackingResult`: `detected`, `landmarks`, `confidence`, `handedness`, `bounding_box`, `timestamp`) ready for future gesture engines.
   * Multi-hand capable configuration (`max_hands` up to 4); one hand is tracked by default for the best latency.
   * Measured pipeline telemetry only: engine latency, pipeline rate and dropped frames.
+* **Interaction Experience** (Phase 6, all derived from real subsystem state):
+  * Typed interaction states resolved every frame: `INITIALIZING`, `SCANNING`, `HAND_DETECTED`, `TRACKING`, `READY`, `MOUSE_MODE`, `DEVICE_MODE`, `ACTION_EXECUTED`, `PAUSED`, `EMERGENCY_STOP`, `HAND_LOST`, `SHUTTING_DOWN`, with safety states resolved first.
+  * Central focus area: `SCANNING / NO HAND` -> `HAND DETECTED / ACQUIRING` -> `TRACKING / LOCKED` -> `GESTURE / PINCH` -> `ACTION / LEFT CLICK`, with animated transitions and a status ring (`SEARCHING`, `TRACKING`, `READY`, `ACTIVE`, `PAUSED`, `EMERGENCY`) whose acquisition arc is the tracker's measured lock progress.
+  * Reusable action feedback: a brief notification per real action result (`LEFT CLICK`, `DRAG START`, `SCROLL DOWN`, `VOLUME UP`, `NEXT TRACK`, `WINDOW SWITCH`, `APP LAUNCHED`, ...) which is reported as a refusal when the backend refuses, repeats coalesce into `xN` instead of spamming, and a safety state pins the notification until it clears.
+  * Recent action timeline: newest first, capped at 8 rows, kept in memory only and cleared on exit - no action history is written to disk.
+  * Tracking quality readout (`TRACKING LOCKED`, `TRACKING LOW CONFIDENCE`, `HAND LOST`) built from the tracker's own state and confidence, and a hand count that reports what the tracker actually sees.
+  * Mode aware telemetry: the mouse module reports real `POINTER`/`CLICK`/`SCROLL` readiness in `MOUSE` mode and reports itself suspended in `DEVICE` mode, while the device module reports the platform's real per-capability availability and the reason a capability is missing.
+  * Performance readout with measured values only: `FPS`, `TRACK ms`, `GESTURE ms`, `CONTROL ms`, shown as `--` until a value has actually been measured, and hideable with `P`.
+  * Safety-first shutdown sequence: control is released, device actions stopped, tracking stopped and the camera closed before `RELEASING CONTROL / STOPPING TRACKING / CAMERA OFF / SYSTEM IDLE` is displayed with the real result of each step.
+  * Voice-ready architecture: one priority ordered intent router (`gesture | text | voice` -> control layer); Phase 8 filled the reserved voice source with an explicitly activated, local speech input (see below).
+* **VisionCore AI Assistant** (Phase 7, optional and entirely separate from the vision pipeline):
+  * `CAMERA -> HAND TRACKING -> GESTURE ENGINE -> INTENT ROUTER (MOUSE | DEVICE | VISIONCORE AI) -> AI INTENT -> SAFETY GATE -> ALLOWED ACTION -> HUD`. The assistant is a *producer of intents*, never a controller: it cannot move the pointer, touch an operating system API, run a command or reach anything that existed before Phase 7.
+  * **Deliberate activation only**: press `A` or click `VISIONCORE AI` in the footer bar. The panel never opens by itself, a gesture can never send a message, and opening the panel never opens a microphone. Phase 7 itself is text in, text out; the explicit voice path is described below.
+  * **Bring your own provider (optional)**: `VISIONCORE_AI_PROVIDER`, `VISIONCORE_AI_API_KEY`, `VISIONCORE_AI_MODEL` (plus optional `VISIONCORE_AI_BASE_URL`, `VISIONCORE_AI_TIMEOUT_SEC`, `VISIONCORE_AI_MAX_TOKENS`, `VISIONCORE_AI_TEMPERATURE`). Without them VisionCore reports `AI / NOT CONFIGURED` and everything else keeps working.
+  * **Offline answers stay honest**: with no provider, questions about VisionCore's own state (`what mode am I in?`, `is tracking active?`, `what gesture is detected?`, `why isn't my cursor moving?`, `what did I just do?`) are answered locally and deterministically from real telemetry, and every such reply is tagged `LOCAL` so it is never confused with a model answer.
+  * **Real context, nothing else**: the assistant receives a small constructed state block (camera state, tracking state and confidence, hand count, gesture and phase, control mode and state, pointer flags, device state and per-capability availability, the last few action labels, render FPS, current errors). No frame, no image, no audio, no file path and nothing about other applications.
+  * **Closed action allowlist**: `VOLUME_UP/DOWN`, `MUTE`, `PLAY_PAUSE`, `NEXT_TRACK`, `PREVIOUS_TRACK`, `BRIGHTNESS_UP/DOWN`, `MINIMIZE`, `MAXIMIZE`, `NEXT_WINDOW`, `PAUSE_CONTROL`, `RESUME_CONTROL`, `DISABLE_CONTROL` and the `MOUSE` / `DEVICE` mode change. Anything else - including shell commands, shutdowns, restarts, logouts, file operations and system settings - is answered with "That action isn't available through VisionCore AI." and is not representable in the system at all.
+  * **Every AI action passes the full gate chain**: strict JSON schema, allowlist, mode check, control-enabled check, emergency check, platform capability check, then the existing controller through the existing priority ordered intent router. An emergency stop, a disabled layer or a missing capability refuses the request, and the reply says so.
+  * **Two-step confirmation** for disruptive requests (`MINIMIZE`, `MAXIMIZE`, `NEXT_WINDOW`, `DISABLE_CONTROL`) with a `CONFIRM` / `CANCEL` strip; harmless questions never ask.
+  * **Honest status only**: `READY`, `PROCESSING` (a request really is with the provider), `RESPONDING`, `EXECUTING`, `ERROR` and `NOT CONFIGURED`. Nothing fakes thinking, no answer is fabricated, and a failure keeps the provider's own reason (`AI PROVIDER TIMEOUT`, `AI PROVIDER RATE LIMIT`, `AI PROVIDER AUTH FAILED`, `AI PROVIDER UNAVAILABLE`, `AI RESPONSE UNREADABLE`).
+  * **Never blocks the pipeline**: provider calls run on one background daemon thread, the render loop only drains a queue, and a request in flight costs the camera and gesture pipeline nothing.
+* **Voice Input** (Phase 8, optional, off by default, local only):
+  * **Explicit activation only**: press `V` (or click `[TALK]`/`[MIC]` in the assistant panel) to open one bounded listening window; `V` again cancels it immediately. The microphone is `OFF` at launch, never opens because a hand appeared, the panel opened, the camera started or the application launched, and it reports `VOICE UNAVAILABLE` honestly when no local engine or device exists.
+  * **Same assistant, same gates**: a transcript becomes an ordinary user message (`YOU - VOICE "..."`), so a spoken request travels the identical allowlist -> safety gate -> existing controller chain as a typed one. There is no second router, no second confirmation system and no voice-specific way to reach the operating system.
+  * **Privacy by construction**: the recogniser is a local, replaceable `SpeechRecognizer` (vosk or the `SpeechRecognition` package); audio is never written to disk, never sent anywhere, and the AI provider receives only the transcribed text plus the same constructed state block a typed message carries.
+  * **Cancellable and stale-safe**: cancelling stops the capture at once, clears the pending text and closes the microphone; a late, malformed or superseded result is discarded by request id and can never execute. Silence ends in `LISTENING TIMEOUT` with `MIC OFF` and the microphone is re-activatable.
+  * **Never blocks a frame**: capture, transcription and the watchdog live on one background worker thread; the measured cost of the voice layer is ~0.002 ms per frame and the loop rate does not drop while listening (24.6 fps listening against 24.9 fps idle, measured at 1280x800 on the validation host).
 * **Resilient Error Recovery**:
   * Automatic detection of camera absence, permission rejections, and hardware locks.
   * Polished user-facing recovery screen with interactive `[ RETRY CAMERA ]` and `[ EXIT SYSTEM ]` controls.
-  * Keyboard accelerators (`C` to enable/pause mouse control, `R` to retry the camera, `F11` for fullscreen, `ESC` to quit).
+  * Keyboard accelerators (`C` to enable/pause mouse control, `M`/`D` for `MOUSE`/`DEVICE` mode, `P` to show/hide the performance readout, `R` to retry the camera, `F11` for fullscreen, `ESC` to quit).
 * **Mouse Control Pipeline**:
   * `CAMERA -> HAND TRACKING -> LANDMARKS -> GESTURE ENGINE -> MOUSE CONTROLLER -> OS CURSOR`.
   * The gesture engine never touches an operating system API: it produces results, and a separate control layer (`app/controls/`) decides whether acting on them is safe.
@@ -208,8 +235,11 @@ python3 main.py --no-tracking
 # Launch with synthetic camera calibration stream (for headless or development)
 python3 main.py --mock-camera
 
-# Enable verbose debug logging
+# Enable verbose debug logging (console only; nothing is written to disk)
 python3 main.py --debug
+
+# Optionally mirror the log into a file of your choosing
+VISIONCORE_LOG_FILE=visioncore.log python3 main.py --debug
 ```
 
 ### Keyboard Controls
@@ -222,6 +252,8 @@ python3 main.py --debug
 | `D` | Switch to `DEVICE` control mode |
 | `F11` | Toggle fullscreen |
 | `R` | Reconnect the camera from the recovery screen |
+| `A` | Open or close the `VISIONCORE AI` panel (while the panel is open every key types into it, and `A` closes it only when the input is empty) |
+| `V` | Open the microphone for one listening window, or cancel the running one (`MICROPHONE OFF` by default; refused honestly while an emergency stop is active) |
 
 ---
 
@@ -370,6 +402,40 @@ Device control is tuned separately and validated on load (values are clamped to 
 * `device_emergency_stop_sec` is how long `OPEN_PALM` must be held before the emergency stop, deliberately longer than the mouse layer's `0.80 s`: a brief palm is play/pause, a deliberate hold stops everything.
 * Background volume tools are selected in a fixed preference order and only ever run as `argv` lists without a shell.
 
+### VisionCore AI Configuration
+
+The assistant is optional. With nothing configured, VisionCore reports `AI / NOT CONFIGURED` in the panel and keeps answering state questions locally; everything else in the application is unaffected.
+
+```bash
+# OpenAI or any OpenAI-compatible chat completions endpoint
+export VISIONCORE_AI_PROVIDER=openai          # openai | openai_compatible | none
+export VISIONCORE_AI_API_KEY=your-key-here    # never committed, never written to disk
+export VISIONCORE_AI_MODEL=gpt-4o-mini
+export VISIONCORE_AI_BASE_URL=https://api.openai.com/v1   # optional
+export VISIONCORE_AI_TIMEOUT_SEC=20           # optional, clamp 3-120
+python3 main.py
+```
+
+* The key is read from the environment only. It is excluded from every object representation, is never logged and is never written to `config.json` - add `VISIONCORE_AI_API_KEY` to your shell profile or your local `.env` (already ignored by git) instead.
+* `VISIONCORE_AI_PROVIDER=none` (or an unknown provider, or a provider without a key) leaves the assistant exactly as it is with no configuration at all.
+* Requests are sent only when you press Enter in the panel. The payload is the conversation plus a small state block (camera, tracking, gesture, control mode and state, device capabilities, the last few action labels, render FPS, current errors). No image, audio, file path or unrelated system information is ever included.
+* Provider failures are reported with their real reason: `AI PROVIDER TIMEOUT`, `AI PROVIDER RATE LIMIT`, `AI PROVIDER AUTH FAILED`, `AI PROVIDER UNAVAILABLE`, `AI RESPONSE UNREADABLE`.
+
+### Voice Input Configuration
+
+Speech input is optional and **off until you press `V`**. It is a separate abstraction from the AI provider: an engine transcribes locally, and only the resulting text is passed to the assistant (or handled as a local command when no provider is configured).
+
+```bash
+export VISIONCORE_SPEECH_PROVIDER=vosk        # vosk | sphinx | none (default: auto-detect)
+export VISIONCORE_SPEECH_MODEL=path/to/model  # required by vosk
+export VISIONCORE_SPEECH_TIMEOUT_SEC=8        # listening window, clamp 2-30
+python3 main.py
+```
+
+* No speech package is required to run VisionCore: with none installed the panel reports `MIC UNAVAILABLE / VOICE UNAVAILABLE`, `V` is refused with the real reason, and text, gestures and every other feature keep working.
+* Audio never leaves the machine and is never persisted: the engine owns the device for the length of one listening window, the microphone is closed at the end of it, and nothing is recorded while the state is not `LISTENING`.
+* The assistant panel writes nothing to speech output - Phase 8 adds no text-to-speech layer at all, so no safety or emergency outcome can be spoken, and no reply can claim an action that did not run.
+
 ### Running in Headless / CI Environments
 * If you are running on a server or remote terminal without an attached physical camera, pass `--mock-camera`:
   ```bash
@@ -390,7 +456,11 @@ VisionCore is built upon a strict **local-first** security model:
 * **Control is Opt-In and Scoped**: Nothing happens until you explicitly enable control *and* select a mode. `MOUSE` mode sends ordinary pointer and wheel events to the session you are already using; `DEVICE` mode sends ordinary media, volume, brightness and window messages that the desktop already understands. Both stop instantly on hand loss, low confidence, an emergency stop or shutdown.
 * **No Shell, No Commands, No Network Control**: There is no `os.system`, no `shell=True`, no command interpreter and no arbitrary command execution anywhere in the project. The only process this application may start is a fixed, validated `argv` for an application on a frozen allowlist (`browser`, `calculator`, `files`), resolved to an absolute executable path. Hand coordinates and gesture names can never become a command, an argument or a shell string, and no device action is ever taken over a network.
 * **No Automation of Security**: VisionCore never bypasses operating system permissions, never automates authentication, never escalates privileges and never manipulates protected system interfaces - it only sends the ordinary input events and device messages a user could send themselves.
-* **No Account Required**: VisionCore runs directly from your terminal with no sign-ups, accounts, or API keys.
+* **AI is Optional and Off Until You Ask**: the assistant only contacts a provider when you type a message and press Enter. Nothing is streamed - no frames, no audio, no activity and no telemetry - and the state block it sends is built by hand from values already on the HUD.
+* **AI Cannot Execute Anything**: the assistant's action vocabulary is a closed allowlist that ends in the control layers that already existed. There is no `eval`, no `exec`, no `shell=True`, no arbitrary subprocess and no interpretation of model output as code anywhere in `app/ai/`; an answer that does not match the JSON schema is refused as unreadable, and a request for a shutdown, a restart, a logout or a shell command is answered with a fixed refusal and never sent as an action.
+* **No API Key Required**: VisionCore runs fully without any provider configured. If you do configure one, the key is read from the environment only - it is never written to `config.json`, the README, a log line or the repository, and it is excluded from every object representation.
+* **The Microphone is Opt-In, Visible and Local**: the microphone is `OFF` at launch and only opens for the length of one explicitly requested listening window (`V` or the panel button), with the state always shown as `MIC OFF / LISTENING / PROCESSING / READY`. Cancelling stops the capture immediately; a late or superseded transcript is discarded rather than acted on; silence closes the device and reports `LISTENING TIMEOUT`. No audio is recorded, saved or transmitted, and no speech synthesis exists in the project, so nothing VisionCore does can be spoken aloud.
+* **Conversations are Memory Only**: the chat history and the recent-action context exist in RAM for the session and are discarded on exit. No conversation is stored, uploaded or written to disk.
 
 ---
 
@@ -407,10 +477,25 @@ vision-core/
 │
 ├── app/
 │   ├── __init__.py          # Package exports
+│   ├── ai/
+│   │   ├── __init__.py      # Assistant package exports
+│   │   ├── assistant.py     # Conversation, status machine & action hand-off
+│   │   ├── client.py        # Background worker: a request never blocks a frame
+│   │   ├── commands.py      # Literal spoken/typed command vocabulary (shared by both)
+│   │   ├── context.py       # Sanitized state block the assistant may see
+│   │   ├── local.py         # Deterministic state answers when offline
+│   │   ├── parser.py        # Strict JSON reply reading (output is data, never code)
+│   │   ├── prompt.py        # System prompt & the response contract
+│   │   ├── provider.py      # Replaceable provider + OpenAI-compatible client
+│   │   ├── router.py        # Closed action allowlist & the route into the safety gates
+│   │   ├── settings.py      # Environment-only configuration (no secret in the repo)
+│   │   └── types.py         # Typed conversation, status, plan & result models
 │   ├── application.py       # Application coordinator & event loop
 │   ├── camera.py            # Hardware capture thread & frame manager
 │   ├── config.py            # AppConfig dataclass & JSON loader/validator
 │   ├── hand_tracking.py     # Hand tracking worker, landmark model & smoothing
+│   ├── interaction/         # Typed interaction states, action feedback & intent router
+│   ├── voice/               # Optional local speech input: engine, controller, settings, types
 │   ├── logger.py            # Clean, formatted console logging
 │   └── state.py             # Lifecycle state machine & telemetry models
 │
@@ -436,12 +521,16 @@ vision-core/
 │
 ├── ui/
 │   ├── __init__.py          # UI component exports
+│   ├── ai_panel.py          # VISIONCORE AI panel: conversation, status, confirmation
 │   ├── animations.py        # Reusable easing, rotation, pulse & scanline tweens
 │   ├── boot_screen.py       # 6-step futuristic system boot sequence
 │   ├── camera_view.py       # Letterboxed camera viewport & overlay HUD
 │   ├── gesture_overlay.py   # Gesture effects, motion trail & readout panel
+│   ├── feedback_view.py     # Action notifications, error strip & recent actions
+│   ├── focus_view.py        # Central focus ring, focus readout & quality chip
 │   ├── hand_overlay.py      # Hand landmark visualization & lock-on animation
 │   ├── hud.py               # Top header, subsystem matrix & telemetry panels
+│   ├── shutdown_screen.py   # Shutdown sequence (safety cleanup runs first)
 │   └── window.py            # Desktop window host, button engine & error screens
 │
 ├── utils/
@@ -460,10 +549,14 @@ Delivered:
 * ~~Gesture recognition: open palm, fist, point, pinch, two finger, swipe left/right~~ (Phase 3)
 * ~~Touchless mouse control: pointer, click, drag, scrolling, with a safety layer~~ (Phase 4)
 * ~~Touchless device control: volume, mute, media, brightness, window actions and an allowlisted launcher, in an explicit `MOUSE` / `DEVICE` mode~~ (Phase 5)
+* ~~Advanced interaction experience: typed interaction states, a central focus ring, reusable action feedback with a memory-only recent-action timeline, mode aware telemetry and a safety-first shutdown sequence~~ (Phase 6)
+* ~~VisionCore AI assistant: an optional provider-backed conversation panel that can explain real state and request a single allowlisted action through the existing safety gates, with deterministic local answers when no provider is configured~~ (Phase 7)
+* ~~Multimodal AI and voice: an explicitly activated, cancellable, local-only speech input that reaches the same assistant through the same safety gates, plus typed input sources, gesture context and honest `VOICE UNAVAILABLE` reporting~~ (Phase 8)
 
 Not implemented, and not claimed anywhere in the interface:
 
-* Keyboard and shortcut automation, shell commands, arbitrary command execution, system power control.
+* Keyboard and shortcut automation, shell commands, arbitrary command execution, system power control (including from the assistant: requests of that kind are refused with a fixed answer and are not representable in the code).
+* Speech recognition without a local engine: voice input needs the `vosk` or `SpeechRecognition` package and a working microphone, and the interface reports `VOICE UNAVAILABLE` rather than approximating one. There is no text-to-speech layer, no wake word and no always-on listening.
 * Browser automation and right-click (a reliable two-finger pinch is not available yet, so right-click is deliberately absent rather than unreliable).
 * Device features the host does not expose: they are reported `UNAVAILABLE` per capability rather than approximated.
 
