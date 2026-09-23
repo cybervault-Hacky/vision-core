@@ -6,13 +6,19 @@ import logging
 import os
 import shutil
 import warnings
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from app.config import AppConfig
+from app.controls import ControlMode, ControlSnapshot, DeviceAction, DeviceSnapshot
+from app.gestures import GestureSnapshot
+from app.hand_tracking import TrackingSnapshot
 from app.state import AppState, Telemetry
+
+# A sidebar module never collapses below this, even in a very short window.
+MIN_PANEL_HEIGHT = 48
 from ui.animations import PulseAnimation
 from ui.boot_screen import BootScreen
 from ui.camera_view import CameraView
@@ -95,11 +101,21 @@ class MainWindow:
         telemetry: Telemetry,
         on_retry_camera: Optional[Callable[[], None]] = None,
         on_exit: Optional[Callable[[], None]] = None,
+        on_control_toggle: Optional[Callable[[], None]] = None,
+        on_control_disable: Optional[Callable[[], None]] = None,
+        on_control_mode: Optional[Callable[[ControlMode], None]] = None,
+        on_device_toggle: Optional[Callable[[], None]] = None,
+        on_device_action: Optional[Callable[[DeviceAction, Optional[str]], None]] = None,
     ):
         self.config = config
         self.telemetry = telemetry
         self.on_retry_camera = on_retry_camera
         self.on_exit = on_exit
+        self.on_control_toggle = on_control_toggle
+        self.on_control_disable = on_control_disable
+        self.on_control_mode = on_control_mode
+        self.on_device_toggle = on_device_toggle
+        self.on_device_action = on_device_action
 
         self.width = max(config.min_window_width, config.window_width)
         self.height = max(config.min_window_height, config.window_height)
@@ -132,6 +148,12 @@ class MainWindow:
         self.btn_retry: Optional[UIButton] = None
         self.btn_exit: Optional[UIButton] = None
         self._update_error_buttons()
+
+        # Sidebar control rectangles, refreshed every rendered frame so clicks
+        # always land on the button the user can actually see.
+        self.control_toggle_rect: Optional[pygame.Rect] = None
+        self.control_disable_rect: Optional[pygame.Rect] = None
+        self.device_buttons: Dict[str, Optional[pygame.Rect]] = {}
 
     def _init_fonts(self) -> Dict[str, pygame.font.Font]:
         """Initialize clean, platform-independent typography."""
@@ -234,6 +256,22 @@ class MainWindow:
                 elif event.key == pygame.K_r:
                     if self.telemetry.app_state == AppState.CAMERA_ERROR:
                         self._handle_retry()
+                elif event.key == pygame.K_c:
+                    # Toggle mouse control from the interface (never from the hand,
+                    # which can only pause an already armed controller).
+                    self._handle_control_toggle()
+                elif event.key == pygame.K_m:
+                    # Control modes are only ever changed deliberately.
+                    self._handle_control_mode(ControlMode.MOUSE)
+                elif event.key == pygame.K_d:
+                    self._handle_control_mode(ControlMode.DEVICE)
+
+            # Control buttons live in the sidebar telemetry panels.
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if self._handle_control_click(event.pos):
+                    continue
+                if self._handle_device_click(event.pos):
+                    continue
 
             # Handle interactive buttons if in error state
             if self.telemetry.app_state == AppState.CAMERA_ERROR:
@@ -243,6 +281,55 @@ class MainWindow:
                     return False
 
         return True
+
+    def _handle_control_click(self, position: Tuple[int, int]) -> bool:
+        """Route a click to the sidebar control buttons. True when consumed."""
+        if self.control_disable_rect and self.control_disable_rect.collidepoint(position):
+            if self.on_control_disable:
+                self.on_control_disable()
+            return True
+        if self.control_toggle_rect and self.control_toggle_rect.collidepoint(position):
+            self._handle_control_toggle()
+            return True
+        return False
+
+    def _handle_control_toggle(self) -> None:
+        if self.on_control_toggle:
+            self.on_control_toggle()
+
+    def _handle_control_mode(self, mode: ControlMode) -> None:
+        if self.on_control_mode:
+            self.on_control_mode(mode)
+
+    def _handle_device_click(self, position: Tuple[int, int]) -> bool:
+        """Route a click to the device module buttons. True when consumed."""
+        for role, rect in self.device_buttons.items():
+            if rect is None or not rect.collidepoint(position):
+                continue
+            if role == "mode":
+                mode = (
+                    ControlMode.MOUSE
+                    if self.telemetry.control_mode is ControlMode.DEVICE
+                    else ControlMode.DEVICE
+                )
+                self._handle_control_mode(mode)
+            elif role == "toggle":
+                if self.on_device_toggle:
+                    self.on_device_toggle()
+            elif role == "minimize":
+                self._device_action(DeviceAction.MINIMIZE)
+            elif role == "maximize":
+                self._device_action(DeviceAction.MAXIMIZE)
+            elif role == "switch":
+                self._device_action(DeviceAction.NEXT_WINDOW)
+            elif role.startswith("launch:"):
+                self._device_action(DeviceAction.LAUNCH_APP, role.split(":", 1)[1])
+            return True
+        return False
+
+    def _device_action(self, action: DeviceAction, argument: Optional[str] = None) -> None:
+        if self.on_device_action:
+            self.on_device_action(action, argument)
 
     def render_error_screen(self) -> None:
         """Render polished sci-fi camera unavailable recovery screen."""
@@ -327,7 +414,14 @@ class MainWindow:
         hint_rect = hint_surf.get_rect(center=(card_rect.centerx, card_y + card_h - 18))
         self.surface.blit(hint_surf, hint_rect)
 
-    def render_active_hud(self, frame: Optional[any]) -> None:
+    def render_active_hud(
+        self,
+        frame: Optional[any],
+        tracking: TrackingSnapshot,
+        gesture: GestureSnapshot,
+        control: ControlSnapshot,
+        device: DeviceSnapshot,
+    ) -> None:
         """Render header, camera viewport, telemetry sidebars, and footer."""
         self.surface.fill(COLOR_BG_DARK)
 
@@ -356,22 +450,137 @@ class MainWindow:
             frame,
             self.telemetry,
             self.fonts,
+            tracking,
+            gesture,
         )
 
-        # 4. Telemetry Panels in Sidebar
-        panel_gap = 14
-        half_height = (content_height - panel_gap) // 2
-        matrix_rect = pygame.Rect(sidebar_x, content_top, sidebar_width, half_height)
-        cam_panel_rect = pygame.Rect(sidebar_x, content_top + half_height + panel_gap, sidebar_width, half_height)
+        # 4. Telemetry Panels in Sidebar (five stacked modules)
+        panel_gap = 10
+        rects = self._stack_panels(
+            sidebar_x, sidebar_width, content_top, content_height, panel_gap
+        )
+        matrix_rect = rects["matrix"]
+        tracking_rect = rects["tracking"]
+        gesture_rect = rects["gesture"]
+        control_rect = rects["control"]
+        device_rect = rects["device"]
+        camera_rect = rects["camera"]
 
-        self.hud_manager.draw_system_matrix_panel(self.surface, matrix_rect, self.telemetry, self.fonts)
-        self.hud_manager.draw_camera_status_panel(self.surface, cam_panel_rect, self.telemetry, self.fonts)
+        self.hud_manager.draw_system_matrix_panel(
+            self.surface, matrix_rect, self.telemetry, self.fonts
+        )
+        self._draw_panel_clipped(
+            self.hud_manager.draw_tracking_panel, tracking_rect
+        )
+        self._draw_panel_clipped(self.hud_manager.draw_gesture_panel, gesture_rect)
 
-    def render_frame(self, frame: Optional[any], dt: float) -> None:
+        self.surface.set_clip(control_rect)
+        self.control_toggle_rect, self.control_disable_rect = self.hud_manager.draw_control_panel(
+            self.surface, control_rect, self.telemetry, self.fonts
+        )
+        self.surface.set_clip(None)
+
+        self.surface.set_clip(device_rect)
+        self.device_buttons = self.hud_manager.draw_device_panel(
+            self.surface, device_rect, self.telemetry, self.fonts
+        )
+        self.surface.set_clip(None)
+
+        self._draw_panel_clipped(self.hud_manager.draw_camera_status_panel, camera_rect)
+
+    def _draw_panel_clipped(self, draw, rect: pygame.Rect) -> None:
+        """Draw one sidebar module inside its own rectangle.
+
+        The clip keeps modules from ever writing over each other, so a window too
+        short for every module shows less of a panel instead of a collision.
+        """
+        self.surface.set_clip(rect)
+        try:
+            draw(self.surface, rect, self.telemetry, self.fonts)
+        finally:
+            self.surface.set_clip(None)
+
+    def _stack_panels(
+        self,
+        x: int,
+        width: int,
+        top: int,
+        height: int,
+        gap: int,
+    ) -> Dict[str, pygame.Rect]:
+        """Lay out the sidebar modules so nothing is ever clipped.
+
+        Each module declares the height it needs to be fully readable and a floor
+        it may shrink to. The matrix is treated as rigid because every row it
+        carries is a status the user must be able to see; the other modules give
+        up height proportionally, and their row renderers drop supplementary rows
+        rather than overlapping.
+        """
+        # (name, ideal, floor, share of surplus)
+        specs = (
+            ("matrix", 118, 118, 0.18),
+            ("tracking", 118, 100, 0.22),
+            ("gesture", 90, 74, 0.15),
+            ("control", 136, 116, 0.13),
+            ("device", 200, 150, 0.20),
+            ("camera", 82, 76, 0.12),
+        )
+        available = max(120, height - gap * (len(specs) - 1))
+        total_ideal = sum(ideal for _, ideal, _, _ in specs)
+        total_floor = sum(floor for _, _, floor, _ in specs)
+        heights: Dict[str, float] = {}
+
+        if available >= total_ideal:
+            surplus = available - total_ideal
+            for name, ideal, _floor, weight in specs:
+                heights[name] = ideal + surplus * weight
+        else:
+            deficit = total_ideal - available
+            shrinkable = total_ideal - total_floor
+            if deficit <= shrinkable and shrinkable > 0:
+                # Every module keeps at least its floor.
+                scale = deficit / shrinkable
+                for name, ideal, floor, _weight in specs:
+                    heights[name] = ideal - (ideal - floor) * scale
+            else:
+                # The window is too short even for the floors: shrink all modules
+                # together so the sidebar always ends inside the window.
+                scale = available / total_floor
+                for name, _ideal, floor, _weight in specs:
+                    heights[name] = floor * scale
+
+        # Integer heights that add up exactly and never collapse a module.
+        pixels = {name: max(MIN_PANEL_HEIGHT, int(value)) for name, value in heights.items()}
+        while sum(pixels.values()) > available:
+            largest = max(pixels, key=lambda name: pixels[name])
+            if pixels[largest] <= MIN_PANEL_HEIGHT:
+                break
+            pixels[largest] -= 1
+        remainder = available - sum(pixels.values())
+        if remainder > 0:
+            widest = max(specs, key=lambda spec: spec[2])[0]
+            pixels[widest] += remainder
+
+        rects: Dict[str, pygame.Rect] = {}
+        y = top
+        for name, _ideal, _floor, _weight in specs:
+            rects[name] = pygame.Rect(x, y, width, pixels[name])
+            y += pixels[name] + gap
+        return rects
+
+    def render_frame(
+        self,
+        frame: Optional[any],
+        dt: float,
+        tracking: TrackingSnapshot,
+        gesture: GestureSnapshot,
+        control: ControlSnapshot,
+        device: DeviceSnapshot,
+    ) -> None:
         """Dispatch rendering based on current application state."""
         self.pulse.update(dt)
         self.hud_manager.update(dt)
-        self.camera_view.update(dt)
+        self.camera_view.update(dt, tracking, gesture)
 
         state = self.telemetry.app_state
 
@@ -379,7 +588,7 @@ class MainWindow:
             self.boot_screen.update(dt)
             self.boot_screen.render(self.surface, pygame.Rect(0, 0, self.width, self.height), self.fonts)
         elif state == AppState.CAMERA_ACTIVE:
-            self.render_active_hud(frame)
+            self.render_active_hud(frame, tracking, gesture, control, device)
         elif state == AppState.CAMERA_ERROR:
             self.render_error_screen()
 

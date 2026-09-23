@@ -51,10 +51,12 @@ class BootScreen:
             BootStep("03", "CAMERA DEVICE PROBE", 0.60),
             BootStep("04", "VISION ENGINE", 0.80),
             BootStep("05", "TRACKING PIPELINE", 0.95),
+            BootStep("06", "GESTURE ENGINE", 0.97),
         ]
 
         self.camera_check_passed: Optional[bool] = None
         self.camera_check_message: str = "CHECKING..."
+        self.tracking_check_passed: Optional[bool] = None
         self.is_complete = False
 
     def notify_camera_result(self, success: bool, message: str) -> None:
@@ -72,6 +74,15 @@ class BootScreen:
                     step.status = "UNAVAILABLE"
                     step.completed = True
                     step.is_failure = True
+
+    def notify_tracking_result(self, success: bool, message: str) -> None:
+        """Receive asynchronous hand tracking engine status during boot."""
+        self.tracking_check_passed = success
+        for step in self.steps:
+            if step.step_id == "05":
+                step.status = "READY" if success else "UNAVAILABLE"
+                step.completed = True
+                step.is_failure = not success
 
     def update(self, dt: float) -> bool:
         """
@@ -96,8 +107,16 @@ class BootScreen:
                     else:
                         step.status = "CHECKING..."
                 elif step.step_id == "05":
-                    step.status = "STANDBY"
-                    step.completed = True
+                    # Tracking engine state is reported by the tracker itself
+                    if self.tracking_check_passed is True:
+                        step.status = "READY"
+                        step.completed = True
+                    elif self.tracking_check_passed is False:
+                        step.status = "UNAVAILABLE"
+                        step.completed = True
+                        step.is_failure = True
+                    else:
+                        step.status = "LOADING..."
                 else:
                     step.status = "READY"
                     step.completed = True
