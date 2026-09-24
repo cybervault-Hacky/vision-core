@@ -1,104 +1,104 @@
-"""Main application desktop window, event loop, and layout manager."""
+"""The application shell: window, top bar, navigation rail and pages.
+
+The shell is a modern desktop application frame:
+
+* a slim top bar with the wordmark on the left and live status indicators on
+  the right - every indicator reflects real runtime state;
+* a compact navigation rail on the left (Vision, AI, Controls, Settings) with
+  outline icons and a quiet active state;
+* a content area that hosts the active workspace, with a subtle page
+  transition between them;
+* a safety banner across the top of the content area while an emergency stop is
+  latched, because that state must be visible from every page.
+
+The shell owns no application logic. Every control on every page resolves to a
+token that is routed here and mapped onto the application callbacks the window
+was constructed with - the existing controllers, safety gates and assistant
+pathways do all of the work.
+"""
 
 from __future__ import annotations
 
-import time
-
 import logging
 import os
-import shutil
-import warnings
-from typing import Callable, Dict, Optional, Tuple
+from enum import Enum
+from typing import Callable, Dict, List, Optional, Tuple
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
 from app.config import AppConfig
-from app.controls import ControlMode, ControlSnapshot, DeviceAction, DeviceSnapshot
+from app.controls import ControlMode, ControlState, DeviceAction
 from app.gestures import GestureSnapshot
 from app.hand_tracking import TrackingSnapshot
 from app.interaction import RecoveryAction
-from app.state import AppState, Telemetry
-
-# A sidebar module never collapses below this, even in a very short window.
-MIN_PANEL_HEIGHT = 48
-from ui.ai_panel import AIPanel
+from app.state import AppState, SubsystemState, Telemetry
+from ui import icons
+from ui.ai_page import AIPage
 from ui.animations import PulseAnimation
 from ui.boot_screen import BootScreen
-from ui.camera_view import CameraView
+from ui.controls_page import ControlsPage
+from ui.settings_page import SettingsPage
 from ui.shutdown_screen import ShutdownScreen
-from ui.hud import (
-    COLOR_BG_DARK,
-    COLOR_CYAN_PRIMARY,
-    COLOR_ERROR,
-    COLOR_ICE_BLUE,
-    COLOR_PANEL_BG,
-    COLOR_PANEL_BORDER,
-    COLOR_TEXT_MUTED,
-    COLOR_TEXT_WHITE,
-    HUDManager,
+from ui.theme import (
+    COLOR_ACCENT,
+    COLOR_ACCENT_TINT,
+    COLOR_BG,
+    COLOR_BORDER,
+    COLOR_DANGER,
+    COLOR_DANGER_TINT,
+    COLOR_SUCCESS,
+    COLOR_WARNING,
+    COLOR_TEXT,
+    COLOR_TEXT_DIM,
+    COLOR_TEXT_FAINT,
+    NAV_WIDTH,
+    TOP_BAR_HEIGHT,
+    ai_status_color,
+    draw_button,
+    draw_panel,
+    ease_out_cubic,
+    fit,
+    subsystem_status_color,
+    voice_state_color,
 )
+from ui.vision_page import VisionPage
+from version import VERSION
 
 logger = logging.getLogger("visioncore.ui")
 
+# Page transition (seconds). Subtle: a short rise, never a full slide.
+TRANSITION_DURATION = 0.22
+TRANSITION_RISE = 14
 
-class UIButton:
-    """Futuristic interactive button with hover states and click detection."""
+# Content padding inside the shell.
+CONTENT_PAD_X = 20
+CONTENT_PAD_TOP = 12
+CONTENT_PAD_BOTTOM = 16
 
-    def __init__(
-        self,
-        rect: pygame.Rect,
-        text: str,
-        is_primary: bool = False,
-        callback: Optional[Callable[[], None]] = None,
-    ):
-        self.rect = rect
-        self.text = text
-        self.is_primary = is_primary
-        self.callback = callback
-        self.is_hovered = False
+# Safety banner.
+BANNER_HEIGHT = 48
 
-    def handle_event(self, event: pygame.event.Event) -> bool:
-        """Process mouse motion and click events. Returns True if clicked."""
-        if event.type == pygame.MOUSEMOTION:
-            self.is_hovered = self.rect.collidepoint(event.pos)
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if self.rect.collidepoint(event.pos):
-                if self.callback:
-                    self.callback()
-                return True
-        return False
+# Navigation items: page, label, icon, keyboard shortcut.
+NAV_ITEMS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("vision", "Vision", "eye", "1"),
+    ("ai", "AI", "spark", "2"),
+    ("controls", "Controls", "sliders", "3"),
+    ("settings", "Settings", "gear", "4"),
+)
 
-    def render(self, surface: pygame.Surface, fonts: Dict[str, pygame.font.Font]) -> None:
-        """Render the button with glowing hover accents."""
-        # Background
-        if self.is_hovered:
-            bg_color = (20, 36, 56) if self.is_primary else (28, 40, 56)
-            border_color = COLOR_CYAN_PRIMARY if self.is_primary else COLOR_ICE_BLUE
-            text_color = COLOR_TEXT_WHITE
-        else:
-            bg_color = (12, 22, 34) if self.is_primary else (15, 20, 30)
-            border_color = (0, 180, 216) if self.is_primary else COLOR_PANEL_BORDER
-            text_color = COLOR_CYAN_PRIMARY if self.is_primary else COLOR_TEXT_MUTED
 
-        pygame.draw.rect(surface, bg_color, self.rect)
-        pygame.draw.rect(surface, border_color, self.rect, 1)
+class Page(Enum):
+    """The four workspaces of the application."""
 
-        # Subtle corner tick marks on hover
-        if self.is_hovered:
-            x, y, w, h = self.rect.x, self.rect.y, self.rect.width, self.rect.height
-            pygame.draw.line(surface, COLOR_CYAN_PRIMARY, (x, y), (x + 8, y), 2)
-            pygame.draw.line(surface, COLOR_CYAN_PRIMARY, (x, y), (x, y + 8), 2)
-            pygame.draw.line(surface, COLOR_CYAN_PRIMARY, (x + w, y + h), (x + w - 8, y + h), 2)
-            pygame.draw.line(surface, COLOR_CYAN_PRIMARY, (x + w, y + h), (x + w, y + h - 8), 2)
-
-        txt_surf = fonts["body"].render(self.text, True, text_color)
-        txt_rect = txt_surf.get_rect(center=self.rect.center)
-        surface.blit(txt_surf, txt_rect)
+    VISION = "vision"
+    AI = "ai"
+    CONTROLS = "controls"
+    SETTINGS = "settings"
 
 
 class MainWindow:
-    """Desktop window host, rendering coordinator, and input event router."""
+    """Desktop window host, application shell and input event router."""
 
     def __init__(
         self,
@@ -117,6 +117,7 @@ class MainWindow:
         on_ai_confirm: Optional[Callable[[], None]] = None,
         on_ai_cancel: Optional[Callable[[], None]] = None,
         on_voice_toggle: Optional[Callable[[], None]] = None,
+        on_emergency_stop: Optional[Callable[[], None]] = None,
     ):
         self.config = config
         self.telemetry = telemetry
@@ -133,6 +134,7 @@ class MainWindow:
         self.on_ai_confirm = on_ai_confirm
         self.on_ai_cancel = on_ai_cancel
         self.on_voice_toggle = on_voice_toggle
+        self.on_emergency_stop = on_emergency_stop
 
         self.width = max(config.min_window_width, config.window_width)
         self.height = max(config.min_window_height, config.window_height)
@@ -144,693 +146,593 @@ class MainWindow:
         if not pygame.font.get_init():
             pygame.font.init()
 
-        # Window flags
         flags = pygame.RESIZABLE
         if config.fullscreen:
             flags |= pygame.FULLSCREEN
 
         self.surface = pygame.display.set_mode((self.width, self.height), flags)
-        pygame.display.set_caption(config.window_title)
+        pygame.display.set_caption(f"VisionCore v{VERSION}")
 
         self.clock = pygame.time.Clock()
         self.fonts = self._init_fonts()
 
-        # UI Subcomponents
+        # UI subcomponents
         self.boot_screen = BootScreen(duration_sec=config.boot_duration_sec)
         self.shutdown_screen = ShutdownScreen()
-        self.hud_manager = HUDManager()
-        self.camera_view = CameraView(hud=self.hud_manager)
         self.pulse = PulseAnimation(min_val=0.4, max_val=1.0, frequency_hz=1.0)
 
-        # VisionCore AI panel: opened deliberately (HUD button or the A key),
-        # never by a gesture and never by itself.
-        self.ai_panel = AIPanel()
-        self.ai_panel_open = False
-        self.ai_button_rect: Optional[pygame.Rect] = None
-
-        # Voice timing for the HUD: elapsed is measured against one time base
-        # (the session clock), never against the render loop's own rate.
-        self._session_started = time.perf_counter()
-
-        # Interactive error recovery buttons
-        self.btn_retry: Optional[UIButton] = None
-        self.btn_exit: Optional[UIButton] = None
-        self._update_error_buttons()
-
-        # Sidebar control rectangles, refreshed every rendered frame so clicks
-        # always land on the button the user can actually see.
-        self.control_toggle_rect: Optional[pygame.Rect] = None
-        self.control_disable_rect: Optional[pygame.Rect] = None
-        self.device_buttons: Dict[str, Optional[pygame.Rect]] = {}
-        # Recovery button offered inside the viewport when an error state has a
-        # genuine retry; the window owns the click routing.
-        self.recovery_button: Optional[Tuple[RecoveryAction, pygame.Rect]] = None
-
-    def _init_fonts(self) -> Dict[str, pygame.font.Font]:
-        """Initialize clean, platform-independent typography."""
-        has_fontconfig = bool(shutil.which("fc-list"))
-
-        def get_font(size: int) -> pygame.font.Font:
-            if has_fontconfig:
-                candidates = ["segoeui", "helvetica", "dejavusans", "arial"]
-                for name in candidates:
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")
-                            f = pygame.font.SysFont(name, size)
-                            if f:
-                                return f
-                    except Exception:
-                        pass
-            return pygame.font.Font(None, size)
-
-        return {
-            "title": get_font(26),
-            "subheading": get_font(18),
-            "body": get_font(15),
-            "caption": get_font(13),
-            "mono": get_font(14),
-            "mono_small": get_font(12),
+        # Workspaces
+        self.vision_page = VisionPage()
+        self.ai_page = AIPage()
+        self.controls_page = ControlsPage()
+        self.settings_page = SettingsPage(config)
+        self._pages = {
+            Page.VISION: self.vision_page,
+            Page.AI: self.ai_page,
+            Page.CONTROLS: self.controls_page,
+            Page.SETTINGS: self.settings_page,
         }
 
-    def _update_error_buttons(self) -> None:
-        """Position the Retry and Exit buttons responsively in the center."""
-        card_w = min(680, self.width - 40)
-        card_x = self.width // 2 - card_w // 2
-        card_y = self.height // 2 - 200
+        self.page = Page.VISION
+        self._nav_rects: List[Tuple[Page, pygame.Rect]] = []
+        self._nav_hover: Optional[Page] = None
+        self._banner_recover_rect: Optional[pygame.Rect] = None
 
-        btn_y = card_y + 330
-        btn_w = 170
-        btn_h = 38
+        # Page transition state.
+        self._transition = 1.0
 
-        retry_x = card_x + (card_w // 2) - btn_w - 15
-        exit_x = card_x + (card_w // 2) + 15
+    def _init_fonts(self) -> Dict[str, pygame.font.Font]:
+        """The application type scale (see :mod:`ui.theme`)."""
+        from ui.theme import build_fonts
 
-        self.btn_retry = UIButton(
-            rect=pygame.Rect(retry_x, btn_y, btn_w, btn_h),
-            text="[ RETRY CAMERA ]",
-            is_primary=True,
-            callback=self._handle_retry,
-        )
-        self.btn_exit = UIButton(
-            rect=pygame.Rect(exit_x, btn_y, btn_w, btn_h),
-            text="[ EXIT SYSTEM ]",
-            is_primary=False,
-            callback=self._handle_exit,
-        )
+        return build_fonts()
 
-    def _handle_retry(self) -> None:
-        """Trigger camera re-probe and restart."""
-        logger.info("User requested camera reconnection retry")
-        if self.on_retry_camera:
-            self.on_retry_camera()
+    # ------------------------------------------------------------------ #
+    # Navigation
+    # ------------------------------------------------------------------ #
 
-    def _handle_exit(self) -> None:
-        """Trigger graceful application exit."""
-        logger.info("User initiated exit from UI")
-        self.is_running = False
-        if self.on_exit:
-            self.on_exit()
+    def switch_page(self, page: Page) -> None:
+        """Switch the active workspace (an explicit user action)."""
+        if page is self.page:
+            return
+        self.page = page
+        self._transition = 0.0
+        if page is not Page.AI:
+            self.ai_page.clear_input()
+        logger.info("Workspace switched to %s", page.value)
+
+    def toggle_ai_page(self) -> None:
+        """A opens the AI workspace; A again returns to the previous view."""
+        self.switch_page(Page.VISION if self.page is Page.AI else Page.AI)
+
+    def _toggle_fullscreen(self) -> None:
+        """Fullscreen toggle (F11 and the Settings row share this path)."""
+        self.config.fullscreen = not self.config.fullscreen
+        flags = pygame.FULLSCREEN if self.config.fullscreen else pygame.RESIZABLE
+        self.surface = pygame.display.set_mode((self.width, self.height), flags)
+        logger.info("Fullscreen %s", "on" if self.config.fullscreen else "off")
+
+    # ------------------------------------------------------------------ #
+    # Events
+    # ------------------------------------------------------------------ #
 
     def handle_events(self) -> bool:
-        """
-        Poll and handle window events (close, resize, keyboard, mouse).
-        Returns False when application should terminate.
-        """
+        """Poll and handle window events. Returns False to terminate."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 logger.info("Window close event received")
                 return False
 
             elif event.type == pygame.VIDEORESIZE:
-                # Clamp to minimum dimensions
                 new_w = max(self.config.min_window_width, event.w)
                 new_h = max(self.config.min_window_height, event.h)
                 self.width = new_w
                 self.height = new_h
-                self.surface = pygame.display.set_mode(
-                    (new_w, new_h), pygame.RESIZABLE
-                )
-                self._update_error_buttons()
+                self.surface = pygame.display.set_mode((new_w, new_h), pygame.RESIZABLE)
                 logger.debug("Window resized to %dx%d", new_w, new_h)
 
-            elif event.type == pygame.KEYDOWN and self.ai_panel_open:
-                # While the assistant panel is focused every keystroke belongs to
-                # it, so a typed "d" can never switch control modes.
-                if event.key == pygame.K_ESCAPE:
-                    logger.info("Escape key pressed -> quitting")
-                    return False
-                if event.key == pygame.K_F11:
-                    pass
-                elif event.key == pygame.K_a and not self.ai_panel.input_text:
-                    self.toggle_ai_panel(False)
-                elif event.key == pygame.K_v and not self.ai_panel.input_text:
-                    # Deliberate microphone activation, either way: V opens the
-                    # microphone, and V again cancels what is being listened to.
-                    # While a message is being typed "v" is just a letter.
-                    self._handle_voice_toggle()
-                else:
-                    intent = self.ai_panel.handle_key(event)
-                    if intent is not None:
-                        self._handle_ai_intent(intent)
-
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    logger.info("Escape key pressed -> quitting")
+                if not self._handle_key(event):
                     return False
-                elif event.key == pygame.K_F11:
-                    # Toggle fullscreen
-                    self.config.fullscreen = not self.config.fullscreen
-                    flags = pygame.FULLSCREEN if self.config.fullscreen else pygame.RESIZABLE
-                    self.surface = pygame.display.set_mode((self.width, self.height), flags)
-                    self._update_error_buttons()
-                elif event.key == pygame.K_r:
-                    if self.telemetry.app_state == AppState.CAMERA_ERROR:
-                        self._handle_retry()
-                elif event.key == pygame.K_c:
-                    # Toggle mouse control from the interface (never from the hand,
-                    # which can only pause an already armed controller).
-                    self._handle_control_toggle()
-                elif event.key == pygame.K_m:
-                    # Control modes are only ever changed deliberately.
-                    self._handle_control_mode(ControlMode.MOUSE)
-                elif event.key == pygame.K_d:
-                    self._handle_control_mode(ControlMode.DEVICE)
-                elif event.key == pygame.K_p:
-                    # Diagnostics can be hidden so the normal view stays clean.
-                    self.telemetry.diagnostics_visible = not self.telemetry.diagnostics_visible
-                elif event.key == pygame.K_a:
-                    # Deliberate activation: the assistant only ever appears when
-                    # the user asks for it.
-                    self.toggle_ai_panel(True)
-                elif event.key == pygame.K_v:
-                    # The microphone has its own key so it can be used without
-                    # opening the panel - and it never opens by itself.
-                    self._handle_voice_toggle()
 
             elif event.type == pygame.MOUSEWHEEL:
-                if self.ai_panel_open:
-                    self.ai_panel.handle_wheel(event.y)
+                page = self._pages[self.page]
+                if hasattr(page, "handle_wheel"):
+                    page.handle_wheel(event.y)
 
-            # Control buttons live in the sidebar telemetry panels.
-            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if self._handle_ai_click(event.pos):
-                    continue
-                if self._handle_recovery_click(event.pos):
-                    continue
-                if self._handle_control_click(event.pos):
-                    continue
-                if self._handle_device_click(event.pos):
-                    continue
-                if self.ai_button_rect and self.ai_button_rect.collidepoint(event.pos):
-                    self.toggle_ai_panel(True)
-                    continue
-
-            # Handle interactive buttons if in error state
-            if self.telemetry.app_state == AppState.CAMERA_ERROR:
-                if self.btn_retry and self.btn_retry.handle_event(event):
-                    pass
-                if self.btn_exit and self.btn_exit.handle_event(event):
-                    return False
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self._handle_click(event.pos)
 
         return True
 
-    # -- assistant panel --------------------------------------------------- #
-
-    def toggle_ai_panel(self, open_: Optional[bool] = None) -> bool:
-        """Open or close the assistant panel (explicit user action only)."""
-        self.ai_panel_open = not self.ai_panel_open if open_ is None else bool(open_)
-        self.telemetry.ai_panel_visible = self.ai_panel_open
-        if not self.ai_panel_open:
-            self.ai_panel.clear_input()
-        logger.info("VisionCore AI panel %s", "opened" if self.ai_panel_open else "closed")
-        return self.ai_panel_open
-
-    def _handle_ai_click(self, position: Tuple[int, int]) -> bool:
-        """Route a click to the panel when it is open. True when consumed."""
-        if not self.ai_panel_open:
+    def _handle_key(self, event: pygame.event.Event) -> bool:
+        """Route one key event. Returns False when the app should quit."""
+        if event.key == pygame.K_ESCAPE:
+            logger.info("Escape key pressed -> quitting")
             return False
-        intent = self.ai_panel.handle_click(position)
-        return self._handle_ai_intent(intent) if intent else False
-
-    def _handle_ai_intent(self, intent: str) -> bool:
-        """Run one panel intent. Returns True when the event is consumed."""
-        if intent == "close":
-            self.toggle_ai_panel(False)
+        if event.key == pygame.K_F11:
+            self._toggle_fullscreen()
             return True
-        if intent == "clear":
-            self.ai_panel.clear_input()
+
+        # While the AI workspace is active every keystroke belongs to its
+        # composer, so a typed "a" can never navigate away mid-sentence.
+        if self.page is Page.AI:
+            typing = bool(self.ai_page.input_text)
+            if not typing and event.key == pygame.K_a:
+                self.toggle_ai_page()
+                return True
+            if not typing and event.key == pygame.K_v:
+                self._handle_voice_toggle()
+                return True
+            if not typing and event.unicode.isdigit() and event.unicode in "1234":
+                self.switch_page(Page(NAV_ITEMS[int(event.unicode) - 1][0]))
+                return True
+            intent = self.ai_page.handle_key(event)
+            if intent is not None:
+                self._run_ai_intent(intent)
+            return True
+
+        if event.key == pygame.K_1:
+            self.switch_page(Page.VISION)
+        elif event.key == pygame.K_2:
+            self.switch_page(Page.AI)
+        elif event.key == pygame.K_3:
+            self.switch_page(Page.CONTROLS)
+        elif event.key == pygame.K_4:
+            self.switch_page(Page.SETTINGS)
+        elif event.key == pygame.K_a:
+            # Deliberate activation: the AI workspace only ever appears when
+            # the user asks for it.
+            self.switch_page(Page.AI)
+        elif event.key == pygame.K_v:
+            # The microphone has its own key so it can be used without opening
+            # the AI page - and it never opens by itself.
+            self._handle_voice_toggle()
+        elif event.key == pygame.K_c:
+            # Toggle mouse control from the interface (never from the hand,
+            # which can only pause an already armed controller).
+            if self.on_control_toggle:
+                self.on_control_toggle()
+        elif event.key == pygame.K_m:
+            # Control modes are only ever changed deliberately.
+            self._run_token("mode:MOUSE")
+        elif event.key == pygame.K_d:
+            self._run_token("mode:DEVICE")
+        elif event.key == pygame.K_p:
+            # Diagnostics can be hidden so the camera view stays clean.
+            self.telemetry.diagnostics_visible = not self.telemetry.diagnostics_visible
+        elif event.key == pygame.K_r:
+            if self.telemetry.app_state == AppState.CAMERA_ERROR:
+                self._run_token("retry_camera")
+        return True
+
+    def _handle_click(self, position: Tuple[int, int]) -> None:
+        """Route a click to the shell, then to the active page."""
+        for page, rect in self._nav_rects:
+            if rect.collidepoint(position):
+                self.switch_page(page)
+                return
+
+        if self._banner_recover_rect is not None and self._banner_recover_rect.collidepoint(position):
+            self._run_token("recover")
+            return
+
+        page = self._pages[self.page]
+        handler = getattr(page, "handle_click", None)
+        token = handler(position) if handler else None
+        if token:
+            self._run_token(token)
+
+    def _run_ai_intent(self, intent: str) -> None:
+        """Run one AI workspace intent."""
+        if intent == "close":
+            self.switch_page(Page.VISION)
+        elif intent == "clear":
+            self.ai_page.clear_input()
             if self.on_ai_clear:
                 self.on_ai_clear()
-            return True
-        if intent == "focus":
-            return self.ai_panel.contains(pygame.mouse.get_pos())
-        if intent == "send":
-            text = self.ai_panel.consume_input()
-            if not text:
-                return True
-            if self.on_ai_send and not self.on_ai_send(text):
-                # A request is already in flight: keep what the user typed
-                # instead of silently discarding it.
-                self.ai_panel.input_text = text[:600]
-            return True
-        if intent == "microphone":
+        elif intent == "send":
+            self._send_ai_input()
+        elif intent == "microphone":
             self._handle_voice_toggle()
-            return True
-        if intent in ("confirm", "cancel"):
-            # Confirmation is performed by the application, never here: the panel
-            # only reports that the user pressed the button.
-            callback = self.on_ai_confirm if intent == "confirm" else self.on_ai_cancel
-            if callback:
-                callback()
-            return True
-        return True
+        elif intent == "confirm":
+            if self.on_ai_confirm:
+                self.on_ai_confirm()
+        elif intent == "cancel":
+            if self.on_ai_cancel:
+                self.on_ai_cancel()
+
+    def _send_ai_input(self) -> None:
+        """Send the composer's text through the existing AI pathway."""
+        text = self.ai_page.consume_input()
+        if not text:
+            return
+        if self.on_ai_send and not self.on_ai_send(text):
+            # A request is already in flight: keep what the user typed
+            # instead of silently discarding it.
+            self.ai_page.input_text = text[:600]
 
     def _handle_voice_toggle(self) -> None:
-        """Ask the application to start or cancel listening (never optional here)."""
+        """Ask the application to start or cancel listening."""
         if self.on_voice_toggle:
             self.on_voice_toggle()
 
-    def _handle_recovery_click(self, position: Tuple[int, int]) -> bool:
-        """Route a click on the viewport RETRY button. True when consumed."""
-        if self.recovery_button is None:
-            return False
-        recovery, rect = self.recovery_button
-        if not rect.collidepoint(position):
-            return False
-        if self.on_recovery:
-            self.on_recovery(recovery)
-        return True
+    # ------------------------------------------------------------------ #
+    # Token routing: page controls -> application callbacks
+    # ------------------------------------------------------------------ #
 
-    def _handle_control_click(self, position: Tuple[int, int]) -> bool:
-        """Route a click to the sidebar control buttons. True when consumed."""
-        if self.control_disable_rect and self.control_disable_rect.collidepoint(position):
-            if self.on_control_disable:
-                self.on_control_disable()
-            return True
-        if self.control_toggle_rect and self.control_toggle_rect.collidepoint(position):
-            self._handle_control_toggle()
-            return True
-        return False
-
-    def _handle_control_toggle(self) -> None:
-        if self.on_control_toggle:
-            self.on_control_toggle()
-
-    def _handle_control_mode(self, mode: ControlMode) -> None:
-        if self.on_control_mode:
-            self.on_control_mode(mode)
-
-    def _handle_device_click(self, position: Tuple[int, int]) -> bool:
-        """Route a click to the device module buttons. True when consumed."""
-        for role, rect in self.device_buttons.items():
-            if rect is None or not rect.collidepoint(position):
-                continue
-            if role == "mode":
-                mode = (
-                    ControlMode.MOUSE
-                    if self.telemetry.control_mode is ControlMode.DEVICE
-                    else ControlMode.DEVICE
-                )
-                self._handle_control_mode(mode)
-            elif role == "toggle":
+    def _run_token(self, token: str) -> None:
+        """Map one page token onto the existing application pathways."""
+        if token == "toggle":
+            # The primary control action for the active mode.
+            if self.telemetry.control_mode is ControlMode.DEVICE:
                 if self.on_device_toggle:
                     self.on_device_toggle()
-            elif role == "minimize":
-                self._device_action(DeviceAction.MINIMIZE)
-            elif role == "maximize":
-                self._device_action(DeviceAction.MAXIMIZE)
-            elif role == "switch":
-                self._device_action(DeviceAction.NEXT_WINDOW)
-            elif role.startswith("launch:"):
-                self._device_action(DeviceAction.LAUNCH_APP, role.split(":", 1)[1])
-            return True
-        return False
-
-    def _device_action(self, action: DeviceAction, argument: Optional[str] = None) -> None:
-        if self.on_device_action:
-            self.on_device_action(action, argument)
-
-    def render_error_screen(self) -> None:
-        """Render polished sci-fi camera unavailable recovery screen."""
-        self.surface.fill(COLOR_BG_DARK)
-
-        card_w = min(680, self.width - 40)
-        card_h = 400
-        card_x = self.width // 2 - card_w // 2
-        card_y = self.height // 2 - card_h // 2
-        card_rect = pygame.Rect(card_x, card_y, card_w, card_h)
-
-        # Panel body & border
-        pygame.draw.rect(self.surface, COLOR_PANEL_BG, card_rect)
-        pygame.draw.rect(self.surface, (50, 25, 35), card_rect, 1)
-
-        # Corner warning brackets
-        b_len = 22
-        b_col = COLOR_ERROR
-        pygame.draw.line(self.surface, b_col, (card_x, card_y), (card_x + b_len, card_y), 2)
-        pygame.draw.line(self.surface, b_col, (card_x, card_y), (card_x, card_y + b_len), 2)
-        pygame.draw.line(self.surface, b_col, (card_x + card_w, card_y), (card_x + card_w - b_len, card_y), 2)
-        pygame.draw.line(self.surface, b_col, (card_x + card_w, card_y), (card_x + card_w, card_y + b_len), 2)
-        pygame.draw.line(self.surface, b_col, (card_x, card_y + card_h), (card_x + b_len, card_y + card_h), 2)
-        pygame.draw.line(self.surface, b_col, (card_x, card_y + card_h), (card_x, card_y + card_h - b_len), 2)
-        pygame.draw.line(self.surface, b_col, (card_x + card_w, card_y + card_h), (card_x + card_w - b_len, card_y + card_h), 2)
-        pygame.draw.line(self.surface, b_col, (card_x + card_w, card_y + card_h), (card_x + card_w, card_y + card_h - b_len), 2)
-
-        # Title
-        title_surf = self.fonts["title"].render("VISIONCORE", True, COLOR_TEXT_WHITE)
-        title_rect = title_surf.get_rect(center=(card_rect.centerx, card_y + 36))
-        self.surface.blit(title_surf, title_rect)
-
-        # Pulsing Error Banner
-        error_surf = self.fonts["subheading"].render("CAMERA HARDWARE UNAVAILABLE", True, COLOR_ERROR)
-        error_rect = error_surf.get_rect(center=(card_rect.centerx, card_y + 70))
-        self.surface.blit(error_surf, error_rect)
-
-        pygame.draw.line(
-            self.surface,
-            COLOR_PANEL_BORDER,
-            (card_x + 30, card_y + 96),
-            (card_x + card_w - 30, card_y + 96),
-            1,
-        )
-
-        # Primary explanatory message
-        msg = self.telemetry.error_message or "No usable camera device could be initialized."
-        msg_surf = self.fonts["body"].render(msg, True, COLOR_TEXT_WHITE)
-        msg_rect = msg_surf.get_rect(center=(card_rect.centerx, card_y + 124))
-        self.surface.blit(msg_surf, msg_rect)
-
-        # Troubleshooting checklist header
-        chk_header = self.fonts["caption"].render("CHECK THAT:", True, COLOR_CYAN_PRIMARY)
-        self.surface.blit(chk_header, (card_x + 45, card_y + 158))
-
-        # Checklist bullets
-        instructions = self.telemetry.error_instructions or [
-            "Your camera is physically connected and turned on.",
-            "Operating system camera permissions are enabled for Python.",
-            "Another application is not exclusively locking the camera device.",
-        ]
-
-        y_bullet = card_y + 184
-        for instr in instructions:
-            pygame.draw.circle(self.surface, COLOR_CYAN_PRIMARY, (card_x + 55, y_bullet + 7), 3)
-            bullet_surf = self.fonts["caption"].render(instr, True, COLOR_TEXT_MUTED)
-            self.surface.blit(bullet_surf, (card_x + 68, y_bullet))
-            y_bullet += 24
-
-        # Render interactive buttons
-        if self.btn_retry:
-            self.btn_retry.render(self.surface, self.fonts)
-        if self.btn_exit:
-            self.btn_exit.render(self.surface, self.fonts)
-
-        # Footer shortcut hint
-        hint_surf = self.fonts["mono_small"].render(
-            "PRESS [R] TO RETRY  |  [ESC] TO EXIT",
-            True,
-            COLOR_TEXT_MUTED,
-        )
-        hint_rect = hint_surf.get_rect(center=(card_rect.centerx, card_y + card_h - 18))
-        self.surface.blit(hint_surf, hint_rect)
-
-    def render_active_hud(
-        self,
-        frame: Optional[any],
-        tracking: TrackingSnapshot,
-        gesture: GestureSnapshot,
-        control: ControlSnapshot,
-        device: DeviceSnapshot,
-    ) -> None:
-        """Render header, camera viewport, telemetry sidebars, and footer."""
-        self.surface.fill(COLOR_BG_DARK)
-
-        # 1. Top Header Bar
-        header_rect = pygame.Rect(0, 0, self.width, 58)
-        self.hud_manager.draw_header(self.surface, header_rect, self.telemetry, self.fonts)
-
-        # 2. Bottom Diagnostics Footer
-        footer_rect = pygame.Rect(0, self.height - 28, self.width, 28)
-        self.hud_manager.draw_footer_diagnostics(self.surface, footer_rect, self.telemetry, self.fonts)
-
-        # 3. Main Workspace Layout
-        content_top = 68
-        content_bottom = self.height - 38
-        content_height = max(100, content_bottom - content_top)
-
-        # The sidebar narrows with the window so the video area keeps a usable
-        # size instead of being squeezed to a strip.
-        sidebar_width = max(232, min(280, int(self.width * 0.28)))
-        sidebar_x = self.width - sidebar_width - 16
-        viewport_width = max(200, sidebar_x - 32)
-        viewport_rect = pygame.Rect(16, content_top, viewport_width, content_height)
-
-        # Render Video Viewport with HUD overlay. The camera view returns the
-        # RETRY button rectangle when an error with a real recovery is shown.
-        self.recovery_button = self.camera_view.render(
-            self.surface,
-            viewport_rect,
-            frame,
-            self.telemetry,
-            self.fonts,
-            tracking,
-            gesture,
-        )
-
-        # 4. Telemetry Panels in Sidebar (stacked modules)
-        panel_gap = 10
-        rects = self._stack_panels(
-            sidebar_x, sidebar_width, content_top, content_height, panel_gap
-        )
-
-        # Modules are drawn only if the layout kept them: a window too short for
-        # the full stack shows fewer modules, never clipped ones.
-        self.hud_manager.draw_system_matrix_panel(
-            self.surface, rects["matrix"], self.telemetry, self.fonts
-        )
-        if "tracking" in rects:
-            self._draw_panel_clipped(self.hud_manager.draw_tracking_panel, rects["tracking"])
-        if "gesture" in rects:
-            self._draw_panel_clipped(self.hud_manager.draw_gesture_panel, rects["gesture"])
-
-        self.control_toggle_rect = None
-        self.control_disable_rect = None
-        if "control" in rects:
-            self.surface.set_clip(rects["control"])
+            elif self.on_control_toggle:
+                self.on_control_toggle()
+        elif token == "disable":
+            if self.on_control_disable:
+                self.on_control_disable()
+        elif token == "device_toggle":
+            if self.on_device_toggle:
+                self.on_device_toggle()
+        elif token.startswith("mode:"):
+            mode = ControlMode.DEVICE if token.endswith("DEVICE") else ControlMode.MOUSE
+            if self.on_control_mode:
+                self.on_control_mode(mode)
+        elif token.startswith("device:"):
             try:
-                (
-                    self.control_toggle_rect,
-                    self.control_disable_rect,
-                ) = self.hud_manager.draw_control_panel(
-                    self.surface, rects["control"], self.telemetry, self.fonts
-                )
-            finally:
-                self.surface.set_clip(None)
+                action = DeviceAction(token.split(":", 1)[1])
+            except ValueError:
+                return
+            if self.on_device_action:
+                self.on_device_action(action, None)
+        elif token.startswith("launch:"):
+            if self.on_device_action:
+                self.on_device_action(DeviceAction.LAUNCH_APP, token.split(":", 1)[1])
+        elif token == "emergency_stop":
+            # The existing highest-priority route: release and stop both
+            # control layers, exactly as the stop gesture does.
+            if self.on_emergency_stop:
+                self.on_emergency_stop()
+        elif token == "recover":
+            # Deliberate recovery through the existing toggle paths, per layer.
+            if self.telemetry.control_state is ControlState.EMERGENCY_STOP:
+                if self.on_control_toggle:
+                    self.on_control_toggle()
+            if self.telemetry.device_state is ControlState.EMERGENCY_STOP:
+                if self.on_device_toggle:
+                    self.on_device_toggle()
+        elif token == "viewport_retry":
+            if self.on_recovery:
+                self.on_recovery(self.vision_page.take_recovery())
+        elif token == "retry_camera":
+            logger.info("User requested camera reconnection retry")
+            if self.on_retry_camera:
+                self.on_retry_camera()
+        elif token == "open_settings":
+            self.switch_page(Page.SETTINGS)
+        elif token == "exit":
+            logger.info("User initiated exit from UI")
+            self.is_running = False
+            if self.on_exit:
+                self.on_exit()
+        elif token == "toggle_diagnostics":
+            self.telemetry.diagnostics_visible = not self.telemetry.diagnostics_visible
+        elif token == "toggle_fullscreen":
+            self._toggle_fullscreen()
+        elif token == "send":
+            self._send_ai_input()
+        elif token == "microphone":
+            self._handle_voice_toggle()
+        elif token == "confirm":
+            if self.on_ai_confirm:
+                self.on_ai_confirm()
+        elif token == "cancel":
+            if self.on_ai_cancel:
+                self.on_ai_cancel()
+        elif token.startswith("suggest:"):
+            text = token.split(":", 1)[1]
+            if self.on_ai_send and not self.on_ai_send(text):
+                self.ai_page.input_text = text[:600]
 
-        self.device_buttons = {}
-        if "device" in rects:
-            self.surface.set_clip(rects["device"])
-            try:
-                self.device_buttons = self.hud_manager.draw_device_panel(
-                    self.surface, rects["device"], self.telemetry, self.fonts
-                )
-            finally:
-                self.surface.set_clip(None)
-
-        if "recent" in rects:
-            self._draw_panel_clipped(
-                self.camera_view.feedback_view.render_timeline_panel, rects["recent"]
-            )
-        if "camera" in rects:
-            self._draw_panel_clipped(
-                self.hud_manager.draw_camera_status_panel, rects["camera"]
-            )
-
-    def _draw_panel_clipped(self, draw, rect: pygame.Rect) -> None:
-        """Draw one sidebar module inside its own rectangle.
-
-        The clip keeps modules from ever writing over each other, so a window too
-        short for every module shows less of a panel instead of a collision.
-        """
-        self.surface.set_clip(rect)
-        try:
-            draw(self.surface, rect, self.telemetry, self.fonts)
-        finally:
-            self.surface.set_clip(None)
-
-    def _stack_panels(
-        self,
-        x: int,
-        width: int,
-        top: int,
-        height: int,
-        gap: int,
-    ) -> Dict[str, pygame.Rect]:
-        """Lay out the sidebar modules so nothing is ever clipped.
-
-        Each module declares the height it needs to be fully readable and a floor
-        it may shrink to. The matrix is treated as rigid because every row it
-        carries is a status the user must be able to see; the other modules give
-        up height proportionally, and their row renderers drop supplementary rows
-        rather than overlapping.
-        """
-        # (name, ideal, floor, share of surplus). The matrix keeps its ideal
-        # height because every row it carries is a status the user must see; the
-        # modules below give up height proportionally and drop supplementary
-        # rows rather than overlapping each other.
-        specs = [
-            # The matrix carries one row per subsystem, and since Phase 8 that
-            # includes the microphone state, so it needs a sixth row.
-            ("matrix", 140, 140, 0.18),
-            ("tracking", 112, 104, 0.22),
-            ("gesture", 84, 76, 0.15),
-            ("control", 140, 130, 0.13),
-            ("device", 190, 150, 0.20),
-            ("recent", 100, 96, 0.12),
-            ("camera", 70, 62, 0.12),
-        ]
-        # When the window is too short for every module, whole modules are
-        # dropped in reverse order of importance rather than every panel being
-        # crushed below the height it needs to be readable.
-        for optional in ("camera", "recent", "gesture", "device", "control"):
-            total = sum(floor for _, _, floor, _ in specs)
-            if height - gap * (len(specs) - 1) >= total:
-                break
-            specs = [spec for spec in specs if spec[0] != optional]
-        specs = tuple(specs)
-        available = max(120, height - gap * (len(specs) - 1))
-        total_ideal = sum(ideal for _, ideal, _, _ in specs)
-        total_floor = sum(floor for _, _, floor, _ in specs)
-        heights: Dict[str, float] = {}
-
-        if available >= total_ideal:
-            surplus = available - total_ideal
-            for name, ideal, _floor, weight in specs:
-                heights[name] = ideal + surplus * weight
-        else:
-            deficit = total_ideal - available
-            shrinkable = total_ideal - total_floor
-            if deficit <= shrinkable and shrinkable > 0:
-                # Every module keeps at least its floor.
-                scale = deficit / shrinkable
-                for name, ideal, floor, _weight in specs:
-                    heights[name] = ideal - (ideal - floor) * scale
-            else:
-                # The window is too short even for the floors: shrink all modules
-                # together so the sidebar always ends inside the window.
-                scale = available / total_floor
-                for name, _ideal, floor, _weight in specs:
-                    heights[name] = floor * scale
-
-        # Integer heights that add up exactly and never collapse a module.
-        pixels = {name: max(MIN_PANEL_HEIGHT, int(value)) for name, value in heights.items()}
-        while sum(pixels.values()) > available:
-            largest = max(pixels, key=lambda name: pixels[name])
-            if pixels[largest] <= MIN_PANEL_HEIGHT:
-                break
-            pixels[largest] -= 1
-        remainder = available - sum(pixels.values())
-        if remainder > 0:
-            widest = max(specs, key=lambda spec: spec[2])[0]
-            pixels[widest] += remainder
-
-        rects: Dict[str, pygame.Rect] = {}
-        y = top
-        for name, _ideal, _floor, _weight in specs:
-            rects[name] = pygame.Rect(x, y, width, pixels[name])
-            y += pixels[name] + gap
-        return rects
+    # ------------------------------------------------------------------ #
+    # Rendering
+    # ------------------------------------------------------------------ #
 
     def render_frame(
         self,
-        frame: Optional[any],
+        frame,
         dt: float,
         tracking: TrackingSnapshot,
         gesture: GestureSnapshot,
-        control: ControlSnapshot,
-        device: DeviceSnapshot,
+        control,
+        device,
     ) -> None:
-        """Dispatch rendering based on current application state."""
+        """Dispatch rendering based on the current application state."""
         self.pulse.update(dt)
-        self.hud_manager.update(dt)
-        self.camera_view.update(dt, tracking, gesture)
+        self._transition = min(1.0, self._transition + dt / TRANSITION_DURATION)
+        self.vision_page.update(dt, tracking, gesture)
 
         state = self.telemetry.app_state
 
         if state == AppState.BOOTING:
             # The sequence is advanced once per frame by the application loop;
             # rendering must never step it a second time.
-            self.boot_screen.render(self.surface, pygame.Rect(0, 0, self.width, self.height), self.fonts)
-        elif state == AppState.CAMERA_ACTIVE:
-            self.render_active_hud(frame, tracking, gesture, control, device)
-        elif state == AppState.CAMERA_ERROR:
-            self.render_error_screen()
-
-        # The assistant is an overlay: it can be opened in any state and it never
-        # changes the layout the rest of the interface depends on.
-        self.render_ai_panel()
+            self.boot_screen.render(
+                self.surface, pygame.Rect(0, 0, self.width, self.height), self.fonts
+            )
+        else:
+            self._render_shell(frame, tracking, gesture)
 
         pygame.display.flip()
 
-    def render_ai_panel(self) -> None:
-        """Draw the assistant panel over the workspace when it is open."""
-        self.ai_button_rect = self.hud_manager.draw_ai_button(
-            self.surface,
-            pygame.Rect(0, self.height - 28, self.width, 28),
-            self.telemetry,
-            self.fonts,
-            opened=self.ai_panel_open,
-        )
-        if not self.ai_panel_open:
-            return
-
-        viewport = self._workspace_rect()
-        content_height = max(100, self.height - 38 - 68)
-        rect = self.ai_panel.layout(viewport, content_height)
-        self.ai_panel.draw(
-            self.surface,
-            rect,
-            self.telemetry.ai,
-            self._ai_context_line(),
-            self.fonts,
-            voice=self.telemetry.voice,
+    def _content_rect(self) -> pygame.Rect:
+        """The page area: right of the rail, below the top bar."""
+        return pygame.Rect(
+            NAV_WIDTH + CONTENT_PAD_X,
+            TOP_BAR_HEIGHT + CONTENT_PAD_TOP,
+            max(200, self.width - NAV_WIDTH - 2 * CONTENT_PAD_X),
+            max(120, self.height - TOP_BAR_HEIGHT - CONTENT_PAD_TOP - CONTENT_PAD_BOTTOM),
         )
 
-    def _workspace_rect(self) -> pygame.Rect:
-        """The camera workspace, computed exactly as the HUD layout does."""
-        content_top = 68
-        content_bottom = self.height - 38
-        content_height = max(100, content_bottom - content_top)
-        sidebar_width = max(232, min(280, int(self.width * 0.28)))
-        sidebar_x = self.width - sidebar_width - 16
-        viewport_width = max(200, sidebar_x - 32)
-        return pygame.Rect(16, content_top, viewport_width, content_height)
+    def _render_shell(self, frame, tracking: TrackingSnapshot, gesture: GestureSnapshot) -> None:
+        """Top bar, navigation rail, safety banner and the active page."""
+        self.surface.fill(COLOR_BG)
 
-    def _ai_context_line(self) -> str:
-        """One line of real state under the assistant status."""
+        emergency = (
+            self.telemetry.control_state is ControlState.EMERGENCY_STOP
+            or self.telemetry.device_state is ControlState.EMERGENCY_STOP
+        )
+
+        self._draw_top_bar(pygame.Rect(0, 0, self.width, TOP_BAR_HEIGHT))
+        self._draw_nav_rail(pygame.Rect(0, TOP_BAR_HEIGHT, NAV_WIDTH, self.height - TOP_BAR_HEIGHT))
+
+        self.telemetry.ai_panel_visible = self.page is Page.AI
+
+        content = self._content_rect()
+        if emergency:
+            banner = pygame.Rect(content.left, content.top, content.width, BANNER_HEIGHT)
+            self._draw_safety_banner(banner)
+            content = pygame.Rect(
+                content.left, content.top + BANNER_HEIGHT + 10,
+                content.width, max(120, content.height - BANNER_HEIGHT - 10),
+            )
+
+        # Page transition: a short rise inside the content clip.
+        previous_clip = self.surface.get_clip()
+        self.surface.set_clip(content)
+        try:
+            rise = int(TRANSITION_RISE * (1.0 - ease_out_cubic(self._transition)))
+            page_rect = content.copy()
+            page_rect.y += rise
+            page_rect.height = max(120, page_rect.height - rise)
+            self._render_page(page_rect, frame, tracking, gesture)
+            if self._transition < 1.0:
+                veil = pygame.Surface(content.size, pygame.SRCALPHA)
+                veil.fill((*COLOR_BG, int(110 * (1.0 - ease_out_cubic(self._transition)))))
+                self.surface.blit(veil, content.topleft)
+        finally:
+            self.surface.set_clip(previous_clip)
+
+    def _render_page(
+        self,
+        rect: pygame.Rect,
+        frame,
+        tracking: TrackingSnapshot,
+        gesture: GestureSnapshot,
+    ) -> None:
         telemetry = self.telemetry
-        mode = (
-            telemetry.control_mode.value
-            if hasattr(telemetry.control_mode, "value")
-            else str(telemetry.control_mode)
+        if self.page is Page.VISION:
+            self.vision_page.render(
+                self.surface, rect, frame, telemetry, self.fonts, tracking, gesture
+            )
+        elif self.page is Page.AI:
+            self.ai_page.render(self.surface, rect, telemetry, self.fonts)
+        elif self.page is Page.CONTROLS:
+            self.controls_page.render(self.surface, rect, telemetry, self.fonts)
+        else:
+            self.settings_page.window_size = (self.width, self.height)
+            self.settings_page.render(self.surface, rect, telemetry, self.fonts)
+
+    # -- top bar ---------------------------------------------------------- #
+
+    def _draw_top_bar(self, rect: pygame.Rect) -> None:
+        """Wordmark on the left, live status indicators on the right."""
+        pygame.draw.rect(self.surface, COLOR_BG, rect)
+        pygame.draw.line(
+            self.surface, COLOR_BORDER,
+            (rect.left, rect.bottom - 1), (rect.right, rect.bottom - 1), 1,
         )
-        line = (
-            f"{mode} MODE | {telemetry.tracking_state.status_label} | "
-            f"GESTURE {telemetry.gesture.value} | HANDS {telemetry.hands_detected}"
+
+        # Wordmark.
+        mark = icons.icon("eye", 18, COLOR_ACCENT)
+        self.surface.blit(mark, (rect.left + 20, rect.centery - mark.get_height() // 2))
+        name = self.fonts["heading"].render("VisionCore", True, COLOR_TEXT)
+        self.surface.blit(
+            name, (rect.left + 20 + mark.get_width() + 9, rect.centery - name.get_height() // 2 - 1)
         )
-        # The microphone gets a word here too, but only while it is doing
-        # something: a closed microphone is the normal case and needs no notice.
-        voice = telemetry.voice
-        if voice.state.value not in ("OFF", ""):
-            line = f"{line} | MIC {voice.state.value}"
-        return line
+        version = self.fonts["small"].render(f"v{VERSION}", True, COLOR_TEXT_FAINT)
+        self.surface.blit(
+            version,
+            (rect.left + 20 + mark.get_width() + 9 + name.get_width() + 8,
+             rect.centery - version.get_height() // 2),
+        )
+
+        # Status indicators, newest priority first, dropped as the window
+        # narrows so they never collide with the wordmark.
+        items = self._status_items()
+        x = rect.right - 20
+        brand_end = (
+            rect.left + 20 + mark.get_width() + 9 + name.get_width()
+            + 8 + version.get_width() + 28
+        )
+        for label, value, color in items:
+            item_width = self._status_item_width(label, value)
+            if x - item_width < brand_end:
+                break
+            self._draw_status_item(x - item_width, rect.centery, label, value, color)
+            x -= item_width + 22
+
+    def _status_items(self) -> List[Tuple[str, str, Tuple[int, int, int]]]:
+        """(label, value, colour) for each indicator, highest priority first.
+
+        The items are drawn right to left, so when the window narrows the least
+        important ones (voice, AI, mode, tracking) are the first to be dropped.
+        """
+        telemetry = self.telemetry
+
+        # Camera: the application lifecycle is the truth here.
+        if telemetry.app_state is AppState.CAMERA_ACTIVE:
+            camera = ("Camera", "Active", subsystem_status_color(telemetry.camera))
+        elif telemetry.app_state is AppState.CAMERA_ERROR:
+            camera = ("Camera", "Unavailable", COLOR_DANGER)
+        else:
+            camera = ("Camera", "Starting", COLOR_TEXT_FAINT)
+
+        # Tracking: the tracker's own state.
+        if telemetry.tracking is SubsystemState.DISABLED:
+            tracking = ("Tracking", "Off", COLOR_TEXT_FAINT)
+        elif telemetry.tracking in (SubsystemState.UNAVAILABLE, SubsystemState.ERROR):
+            tracking = ("Tracking", "Unavailable", COLOR_DANGER)
+        else:
+            tracking = (
+                "Tracking",
+                telemetry.tracking_state.status_label.capitalize(),
+                subsystem_status_color(telemetry.tracking),
+            )
+
+        mode = ("Mode", telemetry.control_mode.label, COLOR_ACCENT)
+        ai = ("AI", telemetry.ai.status_label, ai_status_color(telemetry.ai.status))
+        voice = ("Voice", telemetry.voice.status_label, voice_state_color(telemetry.voice.state))
+        return [camera, tracking, mode, ai, voice]
+
+    def _status_item_width(self, label: str, value: str) -> int:
+        label_w = self.fonts["small"].size(label)[0]
+        value_w = self.fonts["small"].size(value)[0]
+        return 8 + 6 + label_w + 5 + value_w
+
+    def _draw_status_item(
+        self,
+        x: int,
+        center_y: int,
+        label: str,
+        value: str,
+        color: Tuple[int, int, int],
+    ) -> None:
+        """One indicator: status dot, quiet label, real value."""
+        dot_color = color
+        if color is COLOR_SUCCESS or color is COLOR_WARNING:
+            dot_color = tuple(
+                int(channel * (0.55 + 0.45 * self.pulse.value)) for channel in color
+            )
+        pygame.draw.circle(self.surface, dot_color, (int(x + 4), center_y), 3)
+        label_surf = self.fonts["small"].render(label, True, COLOR_TEXT_FAINT)
+        value_surf = self.fonts["small"].render(value, True, COLOR_TEXT_DIM)
+        self.surface.blit(label_surf, (x + 14, center_y - label_surf.get_height() // 2))
+        self.surface.blit(
+            value_surf,
+            (x + 14 + label_surf.get_width() + 5, center_y - value_surf.get_height() // 2),
+        )
+
+    # -- navigation rail -------------------------------------------------- #
+
+    def _draw_nav_rail(self, rect: pygame.Rect) -> None:
+        """Compact navigation: outline icon, small label, quiet active state."""
+        pygame.draw.rect(self.surface, COLOR_BG, rect)
+        pygame.draw.line(
+            self.surface, COLOR_BORDER,
+            (rect.right - 1, rect.top), (rect.right - 1, rect.bottom), 1,
+        )
+
+        mouse = pygame.mouse.get_pos()
+        self._nav_rects = []
+        self._nav_hover = None
+        y = rect.top + 14
+        item_height = 60
+
+        for page_value, label, icon_name, shortcut in NAV_ITEMS:
+            page = Page(page_value)
+            item = pygame.Rect(rect.centerx - (rect.width - 16) // 2, y,
+                               rect.width - 16, item_height)
+            self._nav_rects.append((page, item))
+            hovered = item.collidepoint(mouse)
+            if hovered:
+                self._nav_hover = page
+            active = page is self.page
+
+            if active:
+                pygame.draw.rect(self.surface, COLOR_ACCENT_TINT, item, border_radius=12)
+                pygame.draw.rect(self.surface, (44, 62, 76), item, 1, border_radius=12)
+                icon_color = COLOR_ACCENT
+                label_color = COLOR_TEXT
+            elif hovered:
+                pygame.draw.rect(self.surface, (20, 22, 26), item, border_radius=12)
+                icon_color = COLOR_TEXT_DIM
+                label_color = COLOR_TEXT_DIM
+            else:
+                icon_color = COLOR_TEXT_FAINT
+                label_color = COLOR_TEXT_FAINT
+
+            mark = icons.icon(icon_name, 22, icon_color)
+            self.surface.blit(
+                mark, (item.centerx - mark.get_width() // 2, item.top + 10)
+            )
+            text = self.fonts["small"].render(label, True, label_color)
+            self.surface.blit(
+                text, (item.centerx - text.get_width() // 2, item.bottom - 22)
+            )
+            y += item_height + 6
+
+        # Tooltip for the hovered item, quietly showing its shortcut.
+        if self._nav_hover is not None and self._nav_hover is not self.page:
+            for page_value, label, icon_name, shortcut in NAV_ITEMS:
+                if Page(page_value) is self._nav_hover:
+                    tip = self.fonts["small"].render(
+                        f"{label}  ·  {shortcut}", True, COLOR_TEXT_DIM
+                    )
+                    tip_rect = pygame.Rect(
+                        rect.right + 8, rect.top + 8, tip.get_width() + 16, 26
+                    )
+                    draw_panel(self.surface, tip_rect, fill=(22, 24, 28),
+                               border=COLOR_BORDER, radius=8)
+                    self.surface.blit(
+                        tip, (tip_rect.left + 8, tip_rect.centery - tip.get_height() // 2)
+                    )
+                    break
+
+    # -- safety banner ---------------------------------------------------- #
+
+    def _draw_safety_banner(self, rect: pygame.Rect) -> None:
+        """The one element allowed to interrupt every page."""
+        mouse = pygame.mouse.get_pos()
+        draw_panel(self.surface, rect, fill=COLOR_DANGER_TINT, border=COLOR_DANGER, radius=12)
+
+        mark = icons.icon("warning", 18, COLOR_DANGER)
+        self.surface.blit(mark, (rect.left + 14, rect.centery - mark.get_height() // 2))
+        message = fit(
+            "Emergency stop active — control is stopped and latched. "
+            "Recovery required.",
+            self.fonts["body"], max(60, rect.width - 190),
+        )
+        text = self.fonts["body"].render(message, True, COLOR_TEXT)
+        self.surface.blit(text, (rect.left + 40, rect.centery - text.get_height() // 2))
+
+        recover = pygame.Rect(rect.right - 122, rect.centery - 16, 108, 32)
+        draw_button(
+            self.surface, recover, "Recover", self.fonts, kind="success",
+            hovered=recover.collidepoint(mouse), icon="refresh", icon_module=icons,
+        )
+        self._banner_recover_rect = recover
+
+    # -- shutdown --------------------------------------------------------- #
 
     def render_shutdown(self, dt: float) -> bool:
         """Render one frame of the shutdown sequence.
 
-        Returns True once the sequence has finished. The application has already
-        released control, stopped the tracker and closed the camera before this
-        is called, so nothing here can delay a safety action.
+        Returns True once the sequence has finished. The application has
+        already released control, stopped the tracker and closed the camera
+        before this is called, so nothing here can delay a safety action.
         """
         finished = self.shutdown_screen.update(dt)
         self.shutdown_screen.render(
@@ -842,11 +744,11 @@ class MainWindow:
     def close(self) -> None:
         """Cleanly close the window and release its pygame resources.
 
-        The font handles are dropped and the font module is uninitialised here so
-        that a complete start/stop cycle leaves no descriptor open behind it;
+        The font handles are dropped and the font module is uninitialised here
+        so that a complete start/stop cycle leaves no descriptor open behind it;
         the application calls ``pygame.quit`` immediately afterwards.
         """
-        self.ai_panel.clear_input()
+        self.ai_page.clear_input()
         logger.debug("Closing application window...")
         try:
             self.fonts = {}

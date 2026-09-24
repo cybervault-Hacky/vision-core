@@ -1,20 +1,16 @@
-"""Action feedback: notification, error strip and the recent-action timeline.
+"""Action feedback: the notification toast, the error strip and the activity rows.
 
-Two reusable views built from the same real events:
+Everything shown here is produced by the interaction director from real action
+results, so a notification only ever appears for an action a backend accepted,
+and a RETRY button only exists when the application really can retry.
 
-* :meth:`FeedbackView.render_overlay` draws the notification for the action that
-  just executed (LEFT CLICK, DRAG START, SCROLL DOWN, VOLUME UP, NEXT TRACK,
-  WINDOW SWITCH, APP LAUNCHED, ...) plus the error strip for an error state.
-  Both come from the interaction director, so a notification is only ever shown
-  for an action the backend accepted, and a RETRY button only exists when the
-  application really can retry.
-* :meth:`FeedbackView.render_timeline_panel` draws the recent-action timeline
-  for the sidebar: newest first, capped at a handful of rows, held in memory
+* :meth:`FeedbackView.render_overlay` draws the transient notification and the
+  error strip over the camera viewport;
+* :meth:`FeedbackView.render_activity` draws the recent-action rows for the
+  Controls workspace, newest first, capped at a handful of rows, held in memory
   only and dropped when the application exits.
 
-The notification is a compact card at the top of the viewport: it animates in,
-holds, fades out on its own timeline and never blocks the video. Cards are built
-once per distinct label and reused, so a frame costs one blit.
+Cards are built once per distinct label and reused, so a frame costs one blit.
 """
 
 from __future__ import annotations
@@ -24,51 +20,46 @@ from typing import Dict, Optional, Tuple
 import pygame
 
 from app.interaction import ActionFeedback, FeedbackSource, RecoveryAction
-from app.interaction.feedback import FEEDBACK_DURATION, TIMELINE_LIMIT
+from app.interaction.feedback import FEEDBACK_DURATION
 from app.state import Telemetry
-from ui.hud import (
-    COLOR_CYAN_PRIMARY,
+from ui.theme import (
+    COLOR_ACCENT,
+    COLOR_DANGER,
     COLOR_DISABLED,
-    COLOR_ERROR,
-    COLOR_ICE_BLUE,
-    COLOR_ONLINE,
-    COLOR_PANEL_BG,
-    COLOR_STANDBY,
-    COLOR_TEXT_MUTED,
-    COLOR_TEXT_WHITE,
+    COLOR_SUCCESS,
+    COLOR_TEXT,
+    COLOR_TEXT_DIM,
+    COLOR_WARNING,
 )
 
 # Notification geometry.
-TOAST_PADDING = 10
-TOAST_MIN_WIDTH = 168
-TOAST_MAX_WIDTH = 360
-TOAST_TOP_OFFSET = 46
-TOAST_GAP = 6
+TOAST_PADDING = 12
+TOAST_MIN_WIDTH = 180
+TOAST_MAX_WIDTH = 380
+TOAST_TOP_OFFSET = 18
+TOAST_GAP = 8
 
 # Error strip geometry.
-ERROR_PADDING = 10
-ERROR_BUTTON_SIZE = (74, 22)
+ERROR_PADDING = 12
+ERROR_BUTTON_SIZE = (86, 26)
 
-# Timeline panel.
-ROW_STEP = 15
-ROW_LIMIT = 7
+# Activity rows.
+ROW_STEP = 22
+ROW_LIMIT = 8
 
 _SOURCE_COLOR: Dict[FeedbackSource, Tuple[int, int, int]] = {
-    FeedbackSource.MOUSE: COLOR_ONLINE,
-    FeedbackSource.DEVICE: COLOR_ICE_BLUE,
-    FeedbackSource.MODE: COLOR_CYAN_PRIMARY,
-    FeedbackSource.SAFETY: COLOR_STANDBY,
-    FeedbackSource.SYSTEM: COLOR_TEXT_MUTED,
+    FeedbackSource.MOUSE: COLOR_SUCCESS,
+    FeedbackSource.DEVICE: COLOR_ACCENT,
+    FeedbackSource.MODE: COLOR_ACCENT,
+    FeedbackSource.SAFETY: COLOR_WARNING,
+    FeedbackSource.SYSTEM: COLOR_TEXT_DIM,
 }
 
 
 class FeedbackView:
-    """Renders the notification, the error strip and the recent-action timeline."""
+    """Renders the notification, the error strip and the activity rows."""
 
-    def __init__(self, hud) -> None:
-        # The HUD manager owns the shared panel chrome, so notifications and
-        # sidebar modules cannot drift apart visually.
-        self._hud = hud
+    def __init__(self) -> None:
         self._toast_cache: Dict[Tuple[str, str, tuple, bool], pygame.Surface] = {}
 
     # -- overlay (error strip + notification) ------------------------------ #
@@ -84,7 +75,7 @@ class FeedbackView:
 
         Returns the RETRY button (with the recovery it triggers) when an error
         state offers a recovery the application can actually perform, so the
-        window can route the click; otherwise ``None``.
+        page can route the click; otherwise ``None``.
         """
         interaction = telemetry.interaction
         top = viewport.top + TOAST_TOP_OFFSET
@@ -110,14 +101,6 @@ class FeedbackView:
                 if rect.bottom <= viewport.bottom - 8:
                     card.set_alpha(int(255 * alpha))
                     surface.blit(card, rect)
-                    # Draining underline: the notification's own lifetime, drawn
-                    # on the viewport instead of copying the card every frame.
-                    width = max(1, int((card.get_width() - 2) * alpha))
-                    pygame.draw.rect(
-                        surface,
-                        (*COLOR_ICE_BLUE, 120),
-                        (rect.left + 1, rect.bottom - 3, width, 2),
-                    )
         return retry
 
     # -- notification card ------------------------------------------------- #
@@ -129,24 +112,24 @@ class FeedbackView:
     ) -> pygame.Surface:
         """Notification card for one event, built once and reused."""
         color = (
-            COLOR_ERROR
+            COLOR_DANGER
             if not entry.success
-            else _SOURCE_COLOR.get(entry.source, COLOR_ICE_BLUE)
+            else _SOURCE_COLOR.get(entry.source, COLOR_ACCENT)
         )
         key = (entry.display_label, entry.detail, color, entry.success)
         card = self._toast_cache.get(key)
         if card is not None:
             return card
 
-        label = fonts["body"].render(entry.display_label, True, COLOR_TEXT_WHITE)
-        source = fonts["mono_small"].render(entry.source.label, True, color)
+        label = fonts["body"].render(entry.display_label, True, COLOR_TEXT)
+        source = fonts["small"].render(entry.source.label, True, color)
         detail = (
-            fonts["mono_small"].render(entry.detail, True, COLOR_TEXT_MUTED)
+            fonts["small"].render(entry.detail, True, COLOR_TEXT_DIM)
             if entry.detail
             else None
         )
         text_width = max(
-            label.get_width() + source.get_width() + 18,
+            label.get_width() + source.get_width() + 22,
             detail.get_width() if detail is not None else 0,
         )
         width = max(TOAST_MIN_WIDTH, min(TOAST_MAX_WIDTH, text_width + TOAST_PADDING * 2))
@@ -155,14 +138,14 @@ class FeedbackView:
             height += detail.get_height() + 2
 
         card = pygame.Surface((width, height), pygame.SRCALPHA)
-        card.fill((*COLOR_PANEL_BG, 224))
-        pygame.draw.rect(card, (*color, 190), card.get_rect(), 1)
+        card.fill((12, 14, 17, 216))
+        pygame.draw.rect(card, (46, 52, 60, 230), card.get_rect(), 1, border_radius=10)
         # The left edge carries the outcome colour: also red for a refusal.
-        pygame.draw.rect(card, color, (1, 1, 3, height - 2))
+        pygame.draw.rect(card, (*color, 230), (1, 8, 3, height - 16), border_radius=2)
         card.blit(label, (TOAST_PADDING, TOAST_PADDING - 1))
         card.blit(
             source,
-            source.get_rect(top=TOAST_PADDING + 1, right=width - TOAST_PADDING),
+            source.get_rect(top=TOAST_PADDING + 2, right=width - TOAST_PADDING),
         )
         if detail is not None:
             card.blit(detail, (TOAST_PADDING, TOAST_PADDING + label.get_height()))
@@ -181,28 +164,27 @@ class FeedbackView:
         fonts: Dict[str, pygame.font.Font],
     ) -> Tuple[pygame.Surface, Optional[pygame.Rect]]:
         """Compact error card: readable title, real detail, optional RETRY."""
-        max_width = max(180, min(TOAST_MAX_WIDTH + 90, viewport.width - 24))
-        title = fonts["caption"].render(error.title, True, COLOR_ERROR)
-        detail_text = self._fit(error.detail or "", fonts["mono_small"], max_width - ERROR_PADDING * 2)
-        detail = fonts["mono_small"].render(detail_text, True, COLOR_TEXT_MUTED)
+        max_width = max(200, min(TOAST_MAX_WIDTH + 110, viewport.width - 24))
+        title = fonts["caption"].render(error.title, True, COLOR_DANGER)
+        detail_text = self._fit(error.detail or "", fonts["small"], max_width - ERROR_PADDING * 2)
+        detail = fonts["small"].render(detail_text, True, COLOR_TEXT_DIM) if detail_text else None
 
-        width = max(title.get_width(), detail.get_width()) + ERROR_PADDING * 2
+        width = max(title.get_width(), detail.get_width() if detail else 0) + ERROR_PADDING * 2
         if error.recovery is not None:
             width += ERROR_BUTTON_SIZE[0] + ERROR_PADDING
         width = min(width, max_width)
 
         height = ERROR_PADDING * 2 + title.get_height()
-        if detail_text:
+        if detail is not None:
             height += detail.get_height() + 2
 
         card = pygame.Surface((width, height), pygame.SRCALPHA)
-        card.fill((*COLOR_PANEL_BG, 232))
-        pygame.draw.rect(card, (*COLOR_ERROR, 200), card.get_rect(), 1)
-        # A short red rule marks the card as an error rather than a status line.
-        pygame.draw.rect(card, COLOR_ERROR, (1, 1, 3, height - 2))
+        card.fill((34, 20, 21, 232))
+        pygame.draw.rect(card, (*COLOR_DANGER, 190), card.get_rect(), 1, border_radius=10)
+        pygame.draw.rect(card, (*COLOR_DANGER, 230), (1, 8, 3, height - 16), border_radius=2)
 
         card.blit(title, (ERROR_PADDING, ERROR_PADDING - 1))
-        if detail_text:
+        if detail is not None:
             card.blit(detail, (ERROR_PADDING, ERROR_PADDING + title.get_height()))
 
         retry_rect: Optional[pygame.Rect] = None
@@ -210,10 +192,11 @@ class FeedbackView:
             button = pygame.Rect(0, 0, *ERROR_BUTTON_SIZE)
             button.midright = (width - ERROR_PADDING, height // 2)
             hovered = button.collidepoint(pygame.mouse.get_pos())
-            pygame.draw.rect(card, (14, 44, 36) if hovered else (12, 30, 26), button)
-            pygame.draw.rect(card, COLOR_ONLINE, button, 1)
-            label = fonts["mono_small"].render(
-                error.recovery_label or "RETRY", True, COLOR_ONLINE
+            pygame.draw.rect(card, (56, 30, 32) if hovered else (46, 26, 28), button,
+                             border_radius=7)
+            pygame.draw.rect(card, COLOR_DANGER, button, 1, border_radius=7)
+            label = fonts["small"].render(
+                error.recovery_label or "Retry", True, COLOR_DANGER
             )
             card.blit(label, label.get_rect(center=button.center))
             retry_rect = button
@@ -225,50 +208,49 @@ class FeedbackView:
         if not text or font.size(text)[0] <= max_width:
             return text
         shortened = text
-        while shortened and font.size(shortened + "...")[0] > max_width:
+        while shortened and font.size(shortened + "…")[0] > max_width:
             shortened = shortened[:-1]
-        return (shortened + "...") if shortened else ""
+        return (shortened + "…") if shortened else ""
 
-    # -- timeline panel ---------------------------------------------------- #
+    # -- activity rows (Controls workspace) -------------------------------- #
 
-    def render_timeline_panel(
+    def render_activity(
         self,
         surface: pygame.Surface,
         rect: pygame.Rect,
         telemetry: Telemetry,
         fonts: Dict[str, pygame.font.Font],
-    ) -> None:
-        """Sidebar module: the most recent real actions, newest first."""
-        self._hud.draw_chamfer_panel(surface, rect)
-        self._hud.draw_panel_header(surface, rect, f"RECENT ACTIONS ({TIMELINE_LIMIT})", fonts)
-
+    ) -> int:
+        """Recent real actions, newest first. Returns the height used."""
         rows = telemetry.feedback[:ROW_LIMIT]
         if not rows:
-            empty = fonts["mono_small"].render("NO ACTIONS YET", True, COLOR_DISABLED)
-            surface.blit(empty, (rect.left + 16, rect.top + 44))
-            return
+            text = fonts["caption"].render("No actions yet", True, COLOR_DISABLED)
+            surface.blit(text, (rect.left + 4, rect.top))
+            return text.get_height()
 
         now = telemetry.interaction.now
-        y = rect.top + 40
+        y = rect.top
         for entry in rows:
-            if y + 11 > rect.bottom - 6:
+            if y + 12 > rect.bottom:
                 break
             fresh = entry.age(now) < FEEDBACK_DURATION
             color = (
-                COLOR_ERROR
+                COLOR_DANGER
                 if not entry.success
-                else (_SOURCE_COLOR.get(entry.source, COLOR_ICE_BLUE) if fresh else COLOR_DISABLED)
+                else (_SOURCE_COLOR.get(entry.source, COLOR_ACCENT) if fresh else COLOR_DISABLED)
             )
-            stamp = fonts["mono_small"].render(entry.clock_label, True, color)
+            pygame.draw.circle(surface, color, (rect.left + 4, y + 8), 3)
+            stamp = fonts["mono_small"].render(entry.clock_label, True, COLOR_DISABLED)
             surface.blit(stamp, (rect.left + 16, y))
 
-            available = rect.right - 16 - (rect.left + 16 + stamp.get_width() + 10)
-            label = self._fit_label(entry.display_label, fonts["mono_small"], available)
-            text = fonts["mono_small"].render(
-                label, True, COLOR_TEXT_WHITE if fresh else COLOR_TEXT_MUTED
+            available = rect.right - (rect.left + 16 + stamp.get_width() + 10)
+            label = self._fit_label(entry.display_label, fonts["caption"], available)
+            text = fonts["caption"].render(
+                label, True, COLOR_TEXT if fresh else COLOR_TEXT_DIM
             )
-            surface.blit(text, (rect.right - 16 - text.get_width(), y))
+            surface.blit(text, (rect.right - text.get_width(), y))
             y += ROW_STEP
+        return y - rect.top
 
     @staticmethod
     def _fit_label(label: str, font: pygame.font.Font, max_width: int) -> str:

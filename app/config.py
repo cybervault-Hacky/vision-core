@@ -32,9 +32,9 @@ class AppConfig:
     camera_height: int = 720
 
     # Display & UI settings
-    window_title: str = f"{DISPLAY_VERSION} // ADVANCED VISION SYSTEM"
-    window_width: int = 1100
-    window_height: int = 900
+    window_title: str = DISPLAY_VERSION
+    window_width: int = 1160
+    window_height: int = 780
     min_window_width: int = 800
     min_window_height: int = 600
     fullscreen: bool = False
