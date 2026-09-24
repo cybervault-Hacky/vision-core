@@ -18,6 +18,7 @@ from typing import Dict, Optional, Sequence, Tuple
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
+from app.controls.device_types import DeviceAction
 from app.controls.safety import ControlAction, ControlMode, ControlState
 from app.gestures import Gesture, GesturePhase, GestureSnapshot
 from app.hand_tracking import FINGER_JOINTS, TrackingSnapshot
@@ -25,6 +26,20 @@ from app.state import Telemetry
 from ui.theme import COLOR_ACCENT, COLOR_DANGER, COLOR_SUCCESS
 
 Point = Tuple[float, float]
+Color = Tuple[int, int, int]
+DirectionCue = Tuple[bool, Color]   # (up, colour)
+
+# Directional actions only; any action absent here has no direction.
+_MOUSE_DIRECTIONS: Dict[ControlAction, bool] = {
+    ControlAction.SCROLL_UP: True,
+    ControlAction.SCROLL_DOWN: False,
+}
+_DEVICE_DIRECTIONS: Dict[DeviceAction, bool] = {
+    DeviceAction.VOLUME_UP: True,
+    DeviceAction.VOLUME_DOWN: False,
+    DeviceAction.BRIGHTNESS_UP: True,
+    DeviceAction.BRIGHTNESS_DOWN: False,
+}
 
 INDEX_CHAIN = FINGER_JOINTS["INDEX"]
 MIDDLE_CHAIN = FINGER_JOINTS["MIDDLE"]
@@ -51,7 +66,9 @@ class GestureOverlay:
         result = gesture.result
         active = result.recognized or result.phase is GesturePhase.RELEASE
         hand = tracking.primary if active else None
-        if hand is None or len(hand.landmarks) < len(FINGER_JOINTS["PINKY"]):
+        # The cues index up to the pinky tip, so a partial landmark set has no
+        # cue to draw.
+        if hand is None or len(hand.landmarks) <= FINGER_JOINTS["PINKY"][-1]:
             return
 
         points = [
@@ -132,9 +149,10 @@ class GestureOverlay:
         telemetry: Telemetry,
     ) -> None:
         """Direction arrows for a real scroll or device action that fired."""
-        up, color = GestureOverlay._direction(telemetry)
-        if up is None:
+        cue = GestureOverlay._direction(telemetry)
+        if cue is None:
             return
+        up, color = cue
         index_tip = local[INDEX_CHAIN[-1]]
         middle_tip = local[MIDDLE_CHAIN[-1]]
         centre_x = int((index_tip[0] + middle_tip[0]) / 2)
@@ -150,31 +168,26 @@ class GestureOverlay:
             )
 
     @staticmethod
-    def _direction(telemetry: Telemetry):
-        """``(up, colour)`` for a real scroll or device action, else None."""
+    def _direction(telemetry: Telemetry) -> Optional[DirectionCue]:
+        """Direction of a real scroll or device action that just fired.
+
+        Returns ``(up, colour)`` only when the active control layer recently
+        performed a directional action; returns ``None`` for every other state
+        (no recent action, a stale action, or a non-directional action such as
+        a click, pointer move, mute or media key). Callers must treat ``None``
+        as "no directional cue".
+        """
         if telemetry.control_mode is ControlMode.MOUSE:
-            action = telemetry.control_action
             if telemetry.control_action_age > 0.6:
                 return None
-            if action is ControlAction.SCROLL_UP:
-                return True, COLOR_SUCCESS
-            if action is ControlAction.SCROLL_DOWN:
-                return False, COLOR_SUCCESS
-            return None
+            up = _MOUSE_DIRECTIONS.get(telemetry.control_action)
+            return None if up is None else (up, COLOR_SUCCESS)
 
         action = telemetry.device_action
-        if telemetry.device_action_age > 0.8 or action is None:
+        if action is None or telemetry.device_action_age > 0.8:
             return None
-        name = getattr(action, "value", "")
-        if name == "VOLUME_UP":
-            return True, COLOR_ACCENT
-        if name == "VOLUME_DOWN":
-            return False, COLOR_ACCENT
-        if name == "BRIGHTNESS_UP":
-            return True, COLOR_ACCENT
-        if name == "BRIGHTNESS_DOWN":
-            return False, COLOR_ACCENT
-        return None
+        up = _DEVICE_DIRECTIONS.get(action)
+        return None if up is None else (up, COLOR_ACCENT)
 
     @staticmethod
     def _cue_safety(
