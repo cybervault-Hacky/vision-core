@@ -66,7 +66,9 @@ class GestureOverlay:
         result = gesture.result
         active = result.recognized or result.phase is GesturePhase.RELEASE
         hand = tracking.primary if active else None
-        if hand is None or len(hand.landmarks) < len(FINGER_JOINTS["PINKY"]):
+        # The cues index up to the pinky tip, so a partial landmark set has no
+        # cue to draw.
+        if hand is None or len(hand.landmarks) <= FINGER_JOINTS["PINKY"][-1]:
             return
 
         points = [
