@@ -1,9 +1,25 @@
-"""Camera viewport renderer, letterbox scaling, and futuristic scanning HUD."""
+"""Camera viewport: rounded video surface, letterbox scaling and clean overlays.
+
+The camera feed is the product, so the viewport is a large rounded well with a
+hairline border and no chrome on the video itself. Overlays are limited to what
+the user actually needs while using the application:
+
+* the hand skeleton and the gesture cues (real tracking output);
+* one small floating information line with the measured resolution, frame rate
+  and tracking state;
+* a gesture pill while a gesture is recognised;
+* the optional diagnostics pill (toggled with ``P``) with measured latencies;
+* the notification and error strip, which report real action results.
+
+Frame conversion is unchanged from the validated pipeline: downscaling is
+delegated to OpenCV (INTER_AREA) and native-size frames are handed to pygame
+with zero copies. Nothing is created per frame except small pill surfaces.
+"""
 
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -11,37 +27,33 @@ import numpy as np
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
-from app.gestures import GestureSnapshot
-from app.hand_tracking import TrackingSnapshot
+from app.gestures import Gesture, GesturePhase, GestureSnapshot
+from app.hand_tracking import TrackingSnapshot, TrackingState
 from app.interaction import RecoveryAction
-from app.state import Telemetry
-from ui.animations import PulseAnimation
+from app.state import SubsystemState, Telemetry
 from ui.feedback_view import FeedbackView
-from ui.focus_view import FocusView
 from ui.gesture_overlay import GestureOverlay
 from ui.hand_overlay import HandOverlay
-from ui.hud import (
-    COLOR_CYAN_PRIMARY,
-    COLOR_ICE_BLUE,
-    COLOR_ONLINE,
-    COLOR_PANEL_BORDER,
-    COLOR_TEXT_MUTED,
-    COLOR_TEXT_WHITE,
+from ui.theme import (
+    COLOR_ACCENT,
+    COLOR_BORDER,
+    COLOR_TEXT_DIM,
+    COLOR_TEXT,
+    COLOR_WELL,
+    glass_pill,
+    round_video,
 )
 
-if TYPE_CHECKING:  # the HUD manager is only used to type the injected helper
-    from ui.hud import HUDManager
+VIEWPORT_RADIUS = 14
 
 
 class CameraView:
-    """Renders the video viewport with aspect-ratio preservation and HUD overlays."""
+    """Renders the video viewport with aspect-ratio preservation and overlays."""
 
-    def __init__(self, hud: Optional["HUDManager"] = None) -> None:
-        self.pulse = PulseAnimation(min_val=0.4, max_val=1.0, frequency_hz=1.0)
+    def __init__(self) -> None:
         self.hand_overlay = HandOverlay()
         self.gesture_overlay = GestureOverlay()
-        self.focus_view = FocusView()
-        self.feedback_view = FeedbackView(hud=hud)
+        self.feedback_view = FeedbackView()
 
     def update(
         self,
@@ -50,9 +62,7 @@ class CameraView:
         gesture: GestureSnapshot,
     ) -> None:
         """Advance animation states."""
-        self.pulse.update(dt)
         self.hand_overlay.update(dt, tracking)
-        self.gesture_overlay.update(dt, gesture, tracking)
 
     # -- geometry ---------------------------------------------------------- #
 
@@ -84,29 +94,6 @@ class CameraView:
 
         return pygame.Rect(scaled_x, scaled_y, scaled_w, scaled_h)
 
-    # -- static chrome ----------------------------------------------------- #
-
-    @staticmethod
-    def draw_corner_brackets(
-        surface: pygame.Surface,
-        rect: pygame.Rect,
-        bracket_len: int = 24,
-        thickness: int = 2,
-    ) -> None:
-        """Render futuristic geometric corner brackets around a viewport."""
-        b_len = min(bracket_len, rect.width // 4, rect.height // 4)
-        x, y, w, h = rect.x, rect.y, rect.width, rect.height
-        color = COLOR_CYAN_PRIMARY
-
-        pygame.draw.line(surface, color, (x, y), (x + b_len, y), thickness)
-        pygame.draw.line(surface, color, (x, y), (x, y + b_len), thickness)
-        pygame.draw.line(surface, color, (x + w, y), (x + w - b_len, y), thickness)
-        pygame.draw.line(surface, color, (x + w, y), (x + w, y + b_len), thickness)
-        pygame.draw.line(surface, color, (x, y + h), (x + b_len, y + h), thickness)
-        pygame.draw.line(surface, color, (x, y + h), (x, y + h - b_len), thickness)
-        pygame.draw.line(surface, color, (x + w, y + h), (x + w - b_len, y + h), thickness)
-        pygame.draw.line(surface, color, (x + w, y + h), (x + w, y + h - b_len), thickness)
-
     # -- surfaces ---------------------------------------------------------- #
 
     @staticmethod
@@ -129,7 +116,9 @@ class CameraView:
         surface = pygame.image.frombuffer(frame.tobytes(), (source_width, source_height), "RGB")
         return pygame.transform.smoothscale(surface, target_size)
 
-    def _overlay_badge(
+    # -- pills ------------------------------------------------------------- #
+
+    def _draw_pill(
         self,
         surface: pygame.Surface,
         text: str,
@@ -139,23 +128,21 @@ class CameraView:
         align_right: bool = False,
         dot_color: Optional[Tuple[int, int, int]] = None,
     ) -> pygame.Rect:
-        """Draw a compact translucent telemetry badge."""
+        """Draw a compact translucent pill with an optional status dot."""
         label = font.render(text, True, color)
-        padding = 8
-        dot_space = 14 if dot_color else 0
+        padding = 10
+        dot_space = 12 if dot_color else 0
         width = label.get_width() + padding * 2 + dot_space
-        height = label.get_height() + 8
+        height = label.get_height() + 10
 
         x = anchor[0] - width if align_right else anchor[0]
         rect = pygame.Rect(x, anchor[1], width, height)
 
-        badge = pygame.Surface((width, height), pygame.SRCALPHA)
-        badge.fill((9, 17, 27, 205))
-        pygame.draw.rect(badge, (28, 56, 84, 220), badge.get_rect(), 1)
+        pill = glass_pill((width, height))
         if dot_color:
-            pygame.draw.circle(badge, dot_color, (padding + 3, height // 2), 4)
-        badge.blit(label, (padding + dot_space, 4))
-        surface.blit(badge, rect.topleft)
+            pygame.draw.circle(pill, dot_color, (padding + 3, height // 2), 3)
+        pill.blit(label, (padding + dot_space, 5))
+        surface.blit(pill, rect.topleft)
         return rect
 
     # -- main render ------------------------------------------------------- #
@@ -170,18 +157,16 @@ class CameraView:
         tracking: TrackingSnapshot,
         gesture: GestureSnapshot,
     ) -> Optional[Tuple[RecoveryAction, pygame.Rect]]:
-        """Render the complete camera viewport, video surface, and HUD layers.
+        """Render the viewport: well, video, tracking layers and overlays.
 
-        Draw order is deliberate: video, focus ring (so the hand is never
-        covered by chrome), hand overlay, badges, gesture effects, and finally
-        the action feedback layer, which must stay readable above everything
-        else. Returns the rectangle of the RETRY button when an error state with
-        a real recovery is shown, so the window can route the click.
+        Returns the rectangle of the RETRY button when an error state with a
+        real recovery is shown, so the page can route the click.
         """
-        pygame.draw.rect(surface, (5, 8, 12), viewport_rect)
-        pygame.draw.rect(surface, COLOR_PANEL_BORDER, viewport_rect, 1)
+        # The well: a rounded, near-black surface that frames the video.
+        pygame.draw.rect(surface, COLOR_WELL, viewport_rect, border_radius=VIEWPORT_RADIUS)
+        pygame.draw.rect(surface, COLOR_BORDER, viewport_rect, 1, border_radius=VIEWPORT_RADIUS)
 
-        fitted_rect = viewport_rect
+        fitted_rect = viewport_rect.copy()
 
         if frame is not None and frame.size > 0:
             frame_height, frame_width = frame.shape[:2]
@@ -192,142 +177,118 @@ class CameraView:
             )
             surface.blit(frame_surf, fitted_rect.topleft)
 
-            # Central focus: status ring, focus readout and tracking quality. It
-            # is drawn before the hand so tracked geometry stays legible.
-            self.focus_view.render(surface, fitted_rect, telemetry, fonts)
+            # Rounded corners on the video itself (cached corner patches).
+            if fitted_rect == viewport_rect:
+                round_video(surface, fitted_rect, VIEWPORT_RADIUS, COLOR_WELL)
+                pygame.draw.rect(
+                    surface, COLOR_BORDER, viewport_rect, 1, border_radius=VIEWPORT_RADIUS
+                )
 
-            # Hand tracking layer reacts to the real tracking state. It is
-            # clipped to the video area so no overlay can ever spill into the
-            # letterbox bars, the header or the sidebar.
+            # Tracking layers, clipped to the video area so nothing can spill
+            # into the letterbox bars or outside the viewport.
+            previous_clip = surface.get_clip()
             surface.set_clip(fitted_rect)
             try:
-                self.hand_overlay.render(surface, fitted_rect, tracking, fonts)
+                self.hand_overlay.render(surface, fitted_rect, tracking)
+                self.gesture_overlay.render(
+                    surface, fitted_rect, gesture, tracking, telemetry
+                )
             finally:
-                surface.set_clip(None)
+                surface.set_clip(previous_clip)
 
-        pygame.draw.rect(surface, (18, 36, 56), fitted_rect, 1)
-        self.draw_corner_brackets(surface, fitted_rect, bracket_len=26, thickness=2)
-
-        badge_top = self._draw_viewport_badges(surface, fitted_rect, telemetry, fonts, tracking)
-
-        # Gesture layer consumes recognition results and existing landmarks, and
-        # sits above the badge stack so a centred hand is never covered.
-        self.gesture_overlay.render(
-            surface,
-            fitted_rect,
-            gesture,
-            tracking,
-            fonts,
-            (fitted_rect.right - 14, badge_top - 10),
-            telemetry,
-        )
+            self._draw_viewport_pills(surface, fitted_rect, telemetry, fonts, gesture)
 
         # Feedback last: a notification reports a real result and an error strip
         # offers a recovery, so neither may be hidden behind another layer.
-        return self.feedback_view.render_overlay(surface, fitted_rect, telemetry, fonts)
+        return self.feedback_view.render_overlay(surface, viewport_rect, telemetry, fonts)
 
-    def _draw_viewport_badges(
+    def _draw_viewport_pills(
         self,
         surface: pygame.Surface,
         fitted_rect: pygame.Rect,
         telemetry: Telemetry,
         fonts: Dict[str, pygame.font.Font],
-        tracking: TrackingSnapshot,
-    ) -> int:
-        """Live feed badge, tracking engine badge and resolution readout.
+        gesture: GestureSnapshot,
+    ) -> None:
+        """Gesture pill, information line and optional diagnostics."""
+        font = fonts["small"]
 
-        Returns the top edge of the badge stack so overlays can stack above it.
-        """
-        live_color = (
-            int(COLOR_ONLINE[0] * self.pulse.value),
-            int(COLOR_ONLINE[1] * self.pulse.value),
-            int(COLOR_ONLINE[2] * self.pulse.value),
-        )
-        self._overlay_badge(
-            surface,
-            "FEED // LIVE 01",
-            fonts["caption"],
-            COLOR_TEXT_WHITE,
-            (fitted_rect.x + 14, fitted_rect.y + 12),
-            dot_color=live_color,
-        )
+        # Gesture pill, top-left: shown only while a gesture is recognised, so
+        # the resting viewport stays quiet.
+        result = gesture.result
+        releasing = result.phase is GesturePhase.RELEASE
+        if result.recognized or releasing:
+            name = result.gesture.label if result.gesture is not Gesture.NONE else "None"
+            confidence = (
+                f"{result.confidence * 100:.0f}%"
+                if result.recognized and result.confidence
+                else ""
+            )
+            label = f"{name} · {confidence}" if confidence else name
+            if releasing:
+                label = f"{label} · releasing"
+            self._draw_pill(
+                surface, label, font, COLOR_TEXT,
+                (fitted_rect.x + 14, fitted_rect.y + 14),
+                dot_color=COLOR_ACCENT,
+            )
 
-        engine = f"{telemetry.tracking_engine} // LOCAL"
-        self._overlay_badge(
-            surface,
-            engine,
-            fonts["mono_small"],
-            COLOR_ICE_BLUE,
-            (fitted_rect.right - 14, fitted_rect.y + 12),
-            align_right=True,
-        )
-
-        res_str = (
-            f"CAM {telemetry.camera_index} | {telemetry.camera_width}x{telemetry.camera_height} | "
-            f"{telemetry.camera_fps:.0f} FPS"
+        # Information line, bottom-left: measured resolution, frame rate and
+        # the real tracking state.
+        resolution = (
+            f"{telemetry.camera_width} × {telemetry.camera_height}"
             if telemetry.camera_width > 0
-            else "CAM IDLE"
+            else "—"
         )
-        # Bottom anchored from the badge's own height so it always sits fully
-        # inside the video area, at any window size.
-        badge_height = fonts["mono_small"].get_height() + 8
-        resolution_rect = self._overlay_badge(
-            surface,
-            res_str,
-            fonts["mono_small"],
-            COLOR_ICE_BLUE,
-            (fitted_rect.right - 14, fitted_rect.bottom - 12 - badge_height),
-            align_right=True,
+        fps = telemetry.camera_fps if telemetry.camera_fps > 0 else telemetry.render_fps
+        fps_text = f"{fps:.1f} FPS" if fps > 0 else "— FPS"
+        info = f"{resolution} · {fps_text} · {self._tracking_text(telemetry)}"
+        self._draw_pill(
+            surface, info, font, COLOR_TEXT_DIM,
+            (fitted_rect.x + 14, fitted_rect.bottom - 14 - (font.get_height() + 10)),
         )
 
-        pipeline_str = (
-            f"LANDMARK PIPELINE | {telemetry.tracker_fps:.1f} HZ | "
-            f"{telemetry.tracking_latency_ms:.1f} MS"
-        )
-        pipeline_rect = self._overlay_badge(
-            surface,
-            pipeline_str,
-            fonts["mono_small"],
-            COLOR_TEXT_MUTED,
-            (fitted_rect.right - 14, resolution_rect.top - 6),
-            align_right=True,
-        )
-
-        # Performance readout: measured values only, and only while the user has
-        # the diagnostics readout switched on ([P]).
-        top = pipeline_rect.top
+        # Diagnostics pill, bottom-right: measured values only, and only while
+        # the user has the diagnostics readout switched on ([P]).
         if telemetry.diagnostics_visible:
-            metrics_rect = self._overlay_badge(
+            self._draw_pill(
                 surface,
                 self._performance_text(telemetry),
                 fonts["mono_small"],
-                COLOR_ICE_BLUE,
-                (fitted_rect.right - 14, top - 6),
+                COLOR_TEXT_DIM,
+                (fitted_rect.right - 14, fitted_rect.bottom - 14 - (font.get_height() + 10)),
                 align_right=True,
             )
-            top = metrics_rect.top
-        return top
+
+    @staticmethod
+    def _tracking_text(telemetry: Telemetry) -> str:
+        """One or two words describing the real tracking state."""
+        if telemetry.tracking is SubsystemState.DISABLED:
+            return "Tracking off"
+        if telemetry.tracking in (SubsystemState.UNAVAILABLE, SubsystemState.ERROR):
+            return "Tracking unavailable"
+        state = telemetry.tracking_state
+        if state is TrackingState.TRACKING:
+            return "Tracking locked"
+        if state is TrackingState.DETECTING:
+            return "Acquiring hand"
+        if state is TrackingState.HAND_LOST:
+            return "Hand lost"
+        return "Searching"
 
     @staticmethod
     def _performance_text(telemetry: Telemetry) -> str:
-        """FPS, tracking, gesture and control cost, with ``--`` when unmeasured.
+        """FPS and subsystem costs, with ``--`` when unmeasured.
 
         Every value is measured by the subsystem that owns it; a metric that has
         not been produced yet is shown as ``--`` rather than estimated.
         """
-
         def value(number: float, decimals: int, suffix: str) -> str:
             return f"{number:.{decimals}f} {suffix}" if number > 0 else "--"
 
+        fps = f"{telemetry.render_fps:.0f}" if telemetry.render_fps > 0 else "--"
         return (
-            f"FPS {telemetry.render_fps:.0f}  |  "
-            f"TRACK {value(telemetry.tracking_latency_ms, 1, 'MS')}  |  "
-            f"GESTURE {value(telemetry.gesture_latency_ms, 2, 'MS')}  |  "
-            f"CONTROL {value(telemetry.control_latency_ms, 2, 'MS')}"
-            if telemetry.render_fps > 0
-            else (
-                f"FPS --  |  TRACK {value(telemetry.tracking_latency_ms, 1, 'MS')}  |  "
-                f"GESTURE {value(telemetry.gesture_latency_ms, 2, 'MS')}  |  "
-                f"CONTROL {value(telemetry.control_latency_ms, 2, 'MS')}"
-            )
+            f"FPS {fps} · TRACK {value(telemetry.tracking_latency_ms, 1, 'ms')} · "
+            f"GESTURE {value(telemetry.gesture_latency_ms, 2, 'ms')} · "
+            f"CONTROL {value(telemetry.control_latency_ms, 2, 'ms')}"
         )

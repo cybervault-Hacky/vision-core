@@ -1,42 +1,55 @@
 """VisionCore startup sequence.
 
-Original identity, restrained visual language, and honest reporting: each step
-shows the real result of the subsystem it names. The camera probe and the
-tracking engine are asynchronous, so their steps stay at ``CHECKING``/``LOADING``
-until the application reports what actually happened - the sequence never claims
-a subsystem is ready before it is.
-
-The sequence is deliberately short, ends on a real ``SYSTEM READY`` or
-``RECOVERY REQUIRED`` result, and holds for a moment so the transition into the
-camera interface reads as intentional.
+The sequence is deliberately short and quiet: the wordmark, the version, one
+line of real status per subsystem and a thin progress bar. Each step shows the
+real result of the subsystem it names - the camera probe and the tracking engine
+are asynchronous, so their steps stay at ``Checking``/``Loading`` until the
+application reports what actually happened. The sequence never claims a
+subsystem is ready before it is, ends on a real ``System ready`` or
+``Recovery required`` result, and holds briefly so the transition into the
+workspace reads as intentional.
 """
 
 from __future__ import annotations
 
-import math
 import os
 from typing import Dict, List, Optional, Tuple
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 
-from ui.animations import ProgressAnimation, PulseAnimation, RotationAnimation
-from version import DISPLAY_VERSION
-from ui.hud import (
-    COLOR_BG_DARK,
-    COLOR_CYAN_PRIMARY,
-    COLOR_ERROR,
-    COLOR_ICE_BLUE,
-    COLOR_ONLINE,
-    COLOR_PANEL_BG,
-    COLOR_PANEL_BORDER,
-    COLOR_STANDBY,
-    COLOR_TEXT_MUTED,
-    COLOR_TEXT_WHITE,
+from ui.animations import ProgressAnimation, PulseAnimation
+from version import VERSION
+from ui.theme import (
+    COLOR_BG,
+    COLOR_BORDER,
+    COLOR_DISABLED,
+    COLOR_DANGER,
+    COLOR_SUCCESS,
+    COLOR_TEXT,
+    COLOR_TEXT_DIM,
+    COLOR_TEXT_FAINT,
+    COLOR_WARNING,
+    draw_dot,
 )
 
-# Short hold on "SYSTEM READY" before the camera interface takes over.
+# Short hold on "System ready" before the workspace takes over.
 READY_HOLD_SEC = 0.55
+
+# Sentence-case labels for the raw step statuses.
+_STEP_LABELS = {
+    "READY": ("Ready", COLOR_SUCCESS),
+    "UNAVAILABLE": ("Unavailable", COLOR_DANGER),
+    "DISABLED": ("Disabled", COLOR_DISABLED),
+    "CHECKING...": ("Checking…", COLOR_WARNING),
+    "LOADING...": ("Loading…", COLOR_WARNING),
+    "PROBING...": ("Probing…", COLOR_WARNING),
+    "INITIALIZING": ("Waiting…", COLOR_DISABLED),
+}
+
+
+def _step_label(status: str) -> Tuple[str, Tuple[int, int, int]]:
+    return _STEP_LABELS.get(status, (status.capitalize(), COLOR_TEXT_DIM))
 
 
 class BootStep:
@@ -57,16 +70,15 @@ class BootScreen:
     def __init__(self, duration_sec: float = 2.4):
         self.duration = duration_sec
         self.progress_anim = ProgressAnimation(duration=duration_sec)
-        self.rot_anim = RotationAnimation(speed_deg_per_sec=45.0)
         self.pulse = PulseAnimation(min_val=0.3, max_val=1.0, frequency_hz=1.6)
 
         # Order matters: it is the order the interface genuinely comes up in.
         self.steps: List[BootStep] = [
-            BootStep("01", "CAMERA", 0.18),
-            BootStep("02", "TRACKING", 0.42),
-            BootStep("03", "GESTURE ENGINE", 0.62),
-            BootStep("04", "CONTROL LAYER", 0.78),
-            BootStep("05", "HUD", 0.88),
+            BootStep("01", "Camera", 0.18),
+            BootStep("02", "Hand tracking", 0.42),
+            BootStep("03", "Gesture engine", 0.62),
+            BootStep("04", "Control layer", 0.78),
+            BootStep("05", "Interface", 0.88),
         ]
 
         self.camera_check_passed: Optional[bool] = None
@@ -114,7 +126,6 @@ class BootScreen:
     def update(self, dt: float) -> bool:
         """Advance the sequence. Returns True once it is finished."""
         progress = self.progress_anim.update(dt)
-        self.rot_anim.update(dt)
         self.pulse.update(dt)
 
         for step in self.steps:
@@ -129,7 +140,7 @@ class BootScreen:
             elif step.step_id == "04":
                 status = self._pending_status(self.control_check_passed, "PROBING...")
             else:
-                # The HUD is up the moment it is drawn: that is a real result.
+                # The interface is up the moment it is drawn: a real result.
                 status = "READY"
             if status in ("READY", "DISABLED", "UNAVAILABLE"):
                 step.status = status
@@ -164,43 +175,6 @@ class BootScreen:
 
     # -- rendering --------------------------------------------------------- #
 
-    def draw_tech_emblem(
-        self,
-        surface: pygame.Surface,
-        center: Tuple[int, int],
-        radius: int = 42,
-    ) -> None:
-        """Draw the rotating geometric emblem of the VisionCore identity."""
-        cx, cy = center
-        angle = math.radians(self.rot_anim.angle)
-
-        emblem_surf = pygame.Surface((radius * 2 + 16, radius * 2 + 16), pygame.SRCALPHA)
-        ec = radius + 8
-
-        num_segments = 6
-        for i in range(num_segments):
-            start_th = angle + i * (2 * math.pi / num_segments)
-            end_th = start_th + (math.pi / (num_segments * 1.5))
-            pts = []
-            for step in range(6):
-                th = start_th + (end_th - start_th) * (step / 5)
-                pts.append((ec + int(radius * math.cos(th)), ec + int(radius * math.sin(th))))
-            if len(pts) >= 2:
-                pygame.draw.lines(emblem_surf, (*COLOR_CYAN_PRIMARY, 200), False, pts, 2)
-
-        inner_angle = -angle * 1.2
-        hex_radius = radius - 14
-        hex_pts = []
-        for i in range(6):
-            th = inner_angle + i * (math.pi / 3)
-            hex_pts.append((ec + int(hex_radius * math.cos(th)), ec + int(hex_radius * math.sin(th))))
-        pygame.draw.polygon(emblem_surf, (*COLOR_ICE_BLUE, 160), hex_pts, 1)
-
-        core_r = int(7 * self.pulse.value)
-        pygame.draw.circle(emblem_surf, COLOR_CYAN_PRIMARY, (ec, ec), max(2, core_r))
-
-        surface.blit(emblem_surf, (cx - ec, cy - ec))
-
     def render(
         self,
         surface: pygame.Surface,
@@ -208,101 +182,75 @@ class BootScreen:
         fonts: Dict[str, pygame.font.Font],
     ) -> None:
         """Render the complete startup sequence frame."""
-        surface.fill(COLOR_BG_DARK)
+        surface.fill(COLOR_BG)
 
-        card_w = min(680, screen_rect.width - 40)
-        card_h = 420
-        card_x = screen_rect.centerx - card_w // 2
-        card_y = screen_rect.centery - card_h // 2
-        card_rect = pygame.Rect(card_x, card_y, card_w, card_h)
+        column_width = min(420, screen_rect.width - 48)
+        center_x = screen_rect.centerx
+        y = screen_rect.centery - 150
 
-        pygame.draw.rect(surface, COLOR_PANEL_BG, card_rect)
-        pygame.draw.rect(surface, COLOR_PANEL_BORDER, card_rect, 1)
+        # Wordmark and version.
+        title = fonts["display"].render("VisionCore", True, COLOR_TEXT)
+        surface.blit(title, (center_x - title.get_width() // 2, y))
+        y += title.get_height() + 6
+        version = fonts["small"].render(f"v{VERSION}", True, COLOR_TEXT_FAINT)
+        surface.blit(version, (center_x - version.get_width() // 2, y))
+        y += version.get_height() + 34
 
-        b_len = 20
-        c_col = COLOR_CYAN_PRIMARY
-        for x, y, dx, dy in (
-            (card_x, card_y, 1, 1),
-            (card_x + card_w, card_y, -1, 1),
-            (card_x, card_y + card_h, 1, -1),
-            (card_x + card_w, card_y + card_h, -1, -1),
-        ):
-            pygame.draw.line(surface, c_col, (x, y), (x + b_len * dx, y), 2)
-            pygame.draw.line(surface, c_col, (x, y), (x, y + b_len * dy), 2)
-
-        self.draw_tech_emblem(surface, (card_rect.centerx, card_y + 58), radius=36)
-
-        title_surf = fonts["title"].render(DISPLAY_VERSION.upper(), True, COLOR_TEXT_WHITE)
-        surface.blit(title_surf, title_surf.get_rect(center=(card_rect.centerx, card_y + 116)))
-
+        # One honest line about where the sequence is.
         failure = any(step.is_failure for step in self.steps)
         if self.is_complete and not failure:
-            subtitle, subtitle_color = "SYSTEM READY", COLOR_ONLINE
+            headline, color = "System ready", COLOR_SUCCESS
         elif failure and self.progress_anim.is_complete:
-            subtitle, subtitle_color = "RECOVERY REQUIRED", COLOR_ERROR
+            headline, color = "Recovery required", COLOR_DANGER
         else:
-            subtitle, subtitle_color = "SUBSYSTEM CHECK // INITIALIZING", COLOR_CYAN_PRIMARY
-        sub_surf = fonts["caption"].render(subtitle, True, subtitle_color)
-        surface.blit(sub_surf, sub_surf.get_rect(center=(card_rect.centerx, card_y + 140)))
+            headline, color = "Starting up", COLOR_TEXT_DIM
+        line = fonts["caption"].render(headline, True, color)
+        surface.blit(line, (center_x - line.get_width() // 2, y))
+        y += line.get_height() + 22
 
-        pygame.draw.line(
-            surface,
-            COLOR_PANEL_BORDER,
-            (card_x + 30, card_y + 160),
-            (card_x + card_w - 30, card_y + 160),
-            1,
-        )
-
-        # Diagnostic list: real status per subsystem, dotted leaders between.
-        y_step = card_y + 178
-        label_x = card_x + 84
+        # Subsystem checks: dot, label, real status.
+        row_height = 30
+        rows_top = y
         for step in self.steps:
-            num_surf = fonts["mono"].render(f"[{step.step_id}]", True, COLOR_CYAN_PRIMARY)
-            surface.blit(num_surf, (card_x + 40, y_step))
+            label, status_color = _step_label(step.status)
+            row_center = y + row_height // 2
+            dot_color = status_color
+            if not step.completed and status_color is COLOR_WARNING:
+                dot_color = tuple(
+                    int(channel * (0.45 + 0.55 * self.pulse.value))
+                    for channel in status_color
+                )
+            draw_dot(surface, (center_x - column_width // 2 + 5, row_center),
+                     dot_color, 3)
+            name = fonts["body"].render(step.label, True, COLOR_TEXT_DIM)
+            surface.blit(name, (center_x - column_width // 2 + 20, row_center - name.get_height() // 2))
+            status = fonts["mono_small"].render(label, True, status_color)
+            surface.blit(
+                status,
+                (center_x + column_width // 2 - status.get_width(), row_center - status.get_height() // 2),
+            )
+            y += row_height
+        y = max(y, rows_top + len(self.steps) * row_height) + 18
 
-            lbl_surf = fonts["body"].render(step.label, True, COLOR_TEXT_WHITE)
-            surface.blit(lbl_surf, (label_x, y_step))
+        # Thin progress bar.
+        bar_width = column_width
+        bar = pygame.Rect(center_x - bar_width // 2, y, bar_width, 3)
+        pygame.draw.rect(surface, COLOR_BORDER, bar, border_radius=2)
+        fill_width = int(bar_width * self.progress_anim.progress)
+        if fill_width > 2:
+            fill_color = COLOR_DANGER if failure else COLOR_SUCCESS
+            pygame.draw.rect(
+                surface, fill_color,
+                (bar.left, bar.top, fill_width, bar.height), border_radius=2,
+            )
+        y += 3 + 14
 
-            if step.is_failure:
-                val_color = COLOR_ERROR
-            elif step.completed:
-                val_color = COLOR_ONLINE if step.status == "READY" else COLOR_STANDBY
-            else:
-                val_color = COLOR_TEXT_MUTED
-            val_surf = fonts["mono"].render(step.status, True, val_color)
-            val_rect = val_surf.get_rect(right=card_x + card_w - 40, top=y_step)
-
-            dots_x = label_x + lbl_surf.get_width() + 8
-            dots_w = val_rect.left - 8 - dots_x
-            if dots_w > 8:
-                dots_surf = fonts["mono"].render("." * (dots_w // 8), True, (35, 55, 80))
-                surface.blit(dots_surf, (dots_x, y_step))
-
-            surface.blit(val_surf, val_rect)
-            y_step += 25
-
-        # Progress bar and footer status.
-        bar_y = card_y + card_h - 52
-        bar_w = card_w - 80
-        bar_h = 6
-        bar_x = card_x + 40
-        pygame.draw.rect(surface, (18, 30, 46), (bar_x, bar_y, bar_w, bar_h))
-
-        fill_w = int(bar_w * self.progress_anim.progress)
-        if fill_w > 0:
-            fill_color = COLOR_ERROR if (self.camera_check_passed is False and self.progress_anim.progress > 0.8) else COLOR_CYAN_PRIMARY
-            pygame.draw.rect(surface, fill_color, (bar_x, bar_y, fill_w, bar_h))
-
-        pct_text = f"{int(self.progress_anim.progress * 100):3d}%"
-        pct_surf = fonts["mono_small"].render(pct_text, True, COLOR_ICE_BLUE)
-        surface.blit(pct_surf, pct_surf.get_rect(right=card_x + card_w - 40, bottom=bar_y - 4))
-
-        if self.is_complete and not failure:
-            msg, msg_col = f"{DISPLAY_VERSION.upper()} // INITIALIZING CAMERA HUD", COLOR_ONLINE
-        elif failure and self.progress_anim.is_complete:
-            msg, msg_col = "SUBSYSTEM UNAVAILABLE // TRANSITIONING TO ERROR RECOVERY", COLOR_ERROR
+        percent = f"{int(self.progress_anim.progress * 100)}%"
+        if failure and self.progress_anim.is_complete:
+            note = "A subsystem is unavailable — the interface will open in recovery"
+        elif self.is_complete:
+            note = "Opening the workspace"
         else:
-            msg, msg_col = "SUBSYSTEM VALIDATION IN PROGRESS...", COLOR_TEXT_MUTED
-
-        stat_surf = fonts["mono_small"].render(msg, True, msg_col)
-        surface.blit(stat_surf, (bar_x, bar_y + 12))
+            note = "Running locally — nothing leaves this machine"
+        footer = fonts["small"].render(f"{note}   {percent}", True, COLOR_TEXT_FAINT)
+        surface.blit(footer, (center_x - footer.get_width() // 2, y))

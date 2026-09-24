@@ -1,6 +1,6 @@
 # VisionCore
 
-**VisionCore v1.0.0** is a local-first desktop application for camera-based hand tracking, gesture recognition, and explicitly enabled touchless computer control. It combines an on-device vision pipeline with a dark, futuristic HUD, a safety-gated mouse layer, optional device controls, an optional AI assistant, and optional local voice input.
+**VisionCore v1.0.0** is a local-first desktop application for camera-based hand tracking, gesture recognition, and explicitly enabled touchless computer control. It combines an on-device vision pipeline with a refined dark desktop interface, a safety-gated mouse layer, optional device controls, an optional AI assistant, and optional local voice input.
 
 VisionCore reports the real state of each subsystem. A missing camera, microphone, display backend, speech engine, AI provider, or device capability is shown as unavailable instead of being presented as ready.
 
@@ -17,7 +17,7 @@ Gesture recognition
   ↓
 Safety-gated control layer
   ↓
-HUD and feedback
+Interface and feedback
   ↓
 Optional AI / local voice input
 ```
@@ -28,7 +28,7 @@ VisionCore v1.0.0 is the final release state of the project. No additional roadm
 
 ## Features
 
-- Animated startup checks for the camera, tracking, gesture, control, and HUD subsystems.
+- Animated startup checks for the camera, tracking, gesture, control, and interface subsystems.
 - Camera capture on a background worker with stale-frame dropping and clean release.
 - MediaPipe hand landmark tracking with 21 landmarks, handedness, confidence, and measured pipeline telemetry.
 - Geometry-based gesture recognition with temporal stability, release handling, confidence thresholds, and a neutral `NONE` state.
@@ -48,7 +48,7 @@ VisionCore v1.0.0 is the final release state of the project. No additional roadm
 4. If enabled, the MediaPipe tracker starts on its own worker thread.
 5. The gesture engine converts tracked landmarks into stable gesture results without calling operating-system APIs.
 6. The mouse or device controller applies mode, capability, confidence, pause, and emergency-stop gates before acting.
-7. The HUD renders measured subsystem state, tracking data, gestures, controls, errors, and action feedback.
+7. The interface renders measured subsystem state, tracking data, gestures, controls, errors, and action feedback across its Vision, AI, Controls, and Settings workspaces.
 8. The AI panel and voice input are deliberate input methods. Voice transcripts become ordinary assistant messages and use the same parser, allowlist, and safety path as typed messages.
 9. Shutdown releases control first, then device resources, tracking, camera, gesture state, and the window.
 
@@ -66,7 +66,7 @@ The production code is organized into small layers:
 - `app/interaction/` — intent routing, interaction state, action feedback, and input provenance.
 - `app/ai/` — environment configuration, sanitized context, provider transport, strict response parsing, allowlist, and background worker.
 - `app/voice/` — optional local speech engine selection, bounded capture, cancellation, stale-result protection, and voice state.
-- `ui/` — boot, camera, HUD, gesture, tracking, AI, feedback, and shutdown rendering.
+- `ui/` — the application shell (top bar, navigation rail, workspaces), camera viewport and tracking overlays, the AI workspace, the Controls and Settings workspaces, and the boot and shutdown screens.
 - `utils/` — platform information and dependency/camera diagnostics.
 
 The gesture engine does not control the operating system. AI and voice do not call control backends directly. All actions end in the existing typed controllers and safety gates.
@@ -96,7 +96,7 @@ The application window is intended for Linux, Windows, and macOS. Actual control
 | --- | --- |
 | `opencv-python-headless` | Camera capture, conversion, and resizing |
 | `numpy` | Frame buffers and landmark mathematics |
-| `pygame` | Desktop window, HUD rendering, and input events |
+| `pygame` | Desktop window, interface rendering, and input events |
 | `mediapipe` | On-device hand landmark inference |
 
 AI provider transport uses Python's standard library. Voice engines and microphone bindings are optional and are not required to start the application.
@@ -165,7 +165,7 @@ TRACKING
 VISIONCORE READY
 ```
 
-The camera and tracking results are asynchronous and real. If either is unavailable, the boot screen and HUD show the unavailable state and provide the appropriate recovery or limitation message.
+The camera and tracking results are asynchronous and real. If either is unavailable, the boot screen and the interface show the unavailable state and provide the appropriate recovery or limitation message.
 
 ## Command-Line Options
 
@@ -183,7 +183,7 @@ Available options:
 | `--camera-index N` | Use camera device index `N` instead of the default index `0`. |
 | `--mock-camera` | Use the synthetic calibration source instead of physical camera hardware. |
 | `--max-hands N` | Track between 1 and 4 hands; the default is 1. |
-| `--no-tracking` | Run the camera HUD without starting the hand-tracking pipeline. |
+| `--no-tracking` | Run the camera view without starting the hand-tracking pipeline. |
 | `--debug` | Enable verbose console logging. |
 
 `VISIONCORE_LOG_FILE=/path/to/file.log python3 main.py --debug` can be used when a user explicitly wants a log file. Runtime logs are not written by default.
@@ -193,10 +193,11 @@ Available options:
 | Key | Action |
 | --- | --- |
 | `ESC` | Request shutdown. Control is released before resources are closed. |
+| `1` – `4` | Switch between the Vision, AI, Controls, and Settings workspaces. |
 | `C` | Enable, pause, or resume mouse control. |
 | `M` | Select `MOUSE` mode. |
 | `D` | Select `DEVICE` mode. |
-| `A` | Open or close the VisionCore AI panel. |
+| `A` | Open the AI workspace; `A` again returns to the previous view. |
 | `V` | Start one bounded voice listening window, or cancel the active one. |
 | `P` | Show or hide performance diagnostics. |
 | `R` | Retry the camera from the recovery screen. |
@@ -249,7 +250,7 @@ Control starts `DISABLED`, not merely idle. The pointer does not move until the 
 | Held `OPEN_PALM` | Emergency stop for device and mouse control. |
 | Device panel buttons | Explicit window actions and allowlisted application launcher entries when supported. |
 
-The HUD shows each capability as `READY` or `UNAVAILABLE` with the platform-provided reason. No device action is run in `MOUSE` mode, and no unsupported action reports success.
+The interface shows each capability as ready or unavailable with the platform-provided reason. No device action is run in `MOUSE` mode, and no unsupported action reports success.
 
 ## AI Assistant
 
@@ -306,7 +307,7 @@ export VISIONCORE_SPEECH_PHRASE_LIMIT_SEC=15
 export VISIONCORE_SPEECH_SAMPLE_RATE=16000
 ```
 
-`auto` selects an installed local Vosk model or offline PocketSphinx. No speech package is required for normal startup. If no local engine or microphone is usable, the HUD reports `VOICE UNAVAILABLE` and the rest of VisionCore remains usable.
+`auto` selects an installed local Vosk model or offline PocketSphinx. No speech package is required for normal startup. If no local engine or microphone is usable, the interface reports voice as unavailable and the rest of VisionCore remains usable.
 
 A voice session is bounded, cancellable, and closed on timeout, emergency stop, or shutdown. A transcript is passed to the same AI assistant pipeline as typed text. Raw microphone samples are not saved or sent to an AI provider. VisionCore has no wake word, always-on microphone, or text-to-speech layer.
 
@@ -331,7 +332,7 @@ VisionCore is local-first:
 - Raw microphone audio is captured only during an explicit local listening window, is not persisted, and is never sent to a speech cloud service.
 - Conversations, recent actions, and feedback are held in memory and discarded on exit.
 - No telemetry, analytics, tracking beacons, crash-reporting service, or background network activity is included.
-- The optional AI provider is contacted only after the user submits a request. It receives the conversation and a deliberately constructed state block containing HUD-visible status, control state, capability state, and recent action labels.
+- The optional AI provider is contacted only after the user submits a request. It receives the conversation and a deliberately constructed state block containing interface-visible status, control state, capability state, and recent action labels.
 - AI requests do not include camera frames, images, raw audio, filesystem paths, unrelated application data, passwords, or API keys.
 
 ## Hardware Support
@@ -374,7 +375,7 @@ On headless Linux, follow the OpenCV/libGL remediation in [Headless Linux and Op
 
 ### Tracking unavailable
 
-Tracking is disabled by `--no-tracking`, cannot initialize if MediaPipe is unusable, or may be unavailable after a camera failure. The HUD reports the actual reason. No gesture control is possible while tracking is unavailable.
+Tracking is disabled by `--no-tracking`, cannot initialize if MediaPipe is unusable, or may be unavailable after a camera failure. The interface reports the actual reason. No gesture control is possible while tracking is unavailable.
 
 ### Voice unavailable
 
@@ -396,7 +397,7 @@ Volume, media, brightness, window, and launcher availability is probed independe
 
 ### Display or fullscreen problems
 
-VisionCore requires a desktop display for its normal HUD. Use `--diagnostics` to inspect the display state. `SDL_VIDEODRIVER=dummy` is suitable only for headless validation and does not provide a visible window.
+VisionCore requires a desktop display for its normal interface. Use `--diagnostics` to inspect the display state. `SDL_VIDEODRIVER=dummy` is suitable only for headless validation and does not provide a visible window.
 
 ## Performance
 
@@ -441,7 +442,7 @@ vision-core/
 │   ├── config.py       # Validated local configuration
 │   ├── hand_tracking.py # MediaPipe tracking worker and data model
 │   └── state.py        # Telemetry and lifecycle state
-├── ui/                 # Boot, HUD, camera, panels, and shutdown screens
+├── ui/                 # App shell, workspaces, camera overlays, boot/shutdown
 ├── utils/              # Platform and diagnostics helpers
 ├── main.py             # Canonical entry point
 ├── requirements.txt    # Required runtime dependencies

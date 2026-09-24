@@ -1,4 +1,10 @@
-"""Reusable animation engine and interpolation utilities for VisionCore."""
+"""Animation primitives for VisionCore.
+
+Only what the redesigned interface actually uses: a harmonic pulse for live
+indicators and a controlled progress interpolator for the boot and shutdown
+sequences. Everything here is cheap by construction - no per-frame allocation,
+no surfaces, no particles.
+"""
 
 from __future__ import annotations
 
@@ -9,18 +15,6 @@ def ease_in_out_quad(t: float) -> float:
     """Quadratic ease-in/ease-out curve normalized to [0.0, 1.0]."""
     t = max(0.0, min(1.0, t))
     return 2.0 * t * t if t < 0.5 else -1.0 + (4.0 - 2.0 * t) * t
-
-
-class RotationAnimation:
-    """Continuous angular rotation for reticles, compasses, and scanners."""
-
-    def __init__(self, speed_deg_per_sec: float = 30.0, initial_angle: float = 0.0):
-        self.angle = float(initial_angle)
-        self.speed = speed_deg_per_sec
-
-    def update(self, dt: float) -> float:
-        self.angle = (self.angle + self.speed * dt) % 360.0
-        return self.angle
 
 
 class PulseAnimation:
@@ -43,18 +37,6 @@ class PulseAnimation:
         wave = 0.5 + 0.5 * math.sin(self._elapsed * 2.0 * math.pi * self.frequency)
         self.value = self.min_val + wave * (self.max_val - self.min_val)
         return self.value
-
-
-class ScanlineAnimation:
-    """Vertical scanning beam moving smoothly down the camera viewport."""
-
-    def __init__(self, speed: float = 0.4, initial_pos: float = 0.0):
-        self.position = initial_pos  # 0.0 (top) to 1.0 (bottom)
-        self.speed = speed
-
-    def update(self, dt: float) -> float:
-        self.position = (self.position + self.speed * dt) % 1.0
-        return self.position
 
 
 class ProgressAnimation:

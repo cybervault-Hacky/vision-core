@@ -205,6 +205,7 @@ class Application:
             on_ai_confirm=self._ai_confirm,
             on_ai_cancel=self._ai_cancel,
             on_voice_toggle=self._voice_toggle,
+            on_emergency_stop=self._emergency_stop_from_ui,
         )
 
         self._stopping = False
@@ -434,6 +435,16 @@ class Application:
     def _handle_recovery(self, recovery: RecoveryAction) -> None:
         """Retry button pressed inside the viewport."""
         self._dispatch(IntentKind.RECOVERY, label=recovery.label, payload=recovery.value)
+
+    def _emergency_stop_from_ui(self) -> None:
+        """UI action: the emergency-stop button on the control bar.
+
+        This is the same route the stop gesture takes - the highest priority
+        intent, dispatched through the one router both layers answer to - so the
+        interface adds no second safety system and bypasses no gate. Recovery
+        stays deliberate: only the explicit toggle paths clear the latch.
+        """
+        self._dispatch(IntentKind.EMERGENCY_STOP, label="EMERGENCY STOP")
 
     # -- assistant routes -------------------------------------------------- #
 
